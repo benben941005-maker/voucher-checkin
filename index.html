@@ -76,6 +76,14 @@
       </div>
       <div id="apiKeyStatus" style="margin-top:6px;"></div>
     </details>
+    <details class="settings-bar" id="sheetsDetails" style="margin-top:10px;">
+      <summary>🔄 Google Sheets Sync URL (needed for multi-device sync)</summary>
+      <div class="key-row">
+        <input type="text" id="sheetsUrlInput" placeholder="Paste your Apps Script Web App URL">
+        <button class="btn-secondary" id="saveSheetsUrlBtn" style="width:auto;">Save</button>
+      </div>
+      <div id="sheetsUrlStatus" style="margin-top:6px;"></div>
+    </details>
   </div>
 
   <div class="card">
@@ -123,6 +131,7 @@
 
   <div class="card">
     <h2>Today's Check-Ins <span class="count-pill" id="countPill">0</span></h2>
+    <div id="syncStatus" style="font-size:12px;color:var(--muted);margin-bottom:8px;"></div>
     <div id="tableWrap"><div class="empty">No check-ins yet.</div></div>
     <div class="btn-row" style="margin-top:14px;">
       <button class="btn-secondary" id="exportBtn">⬇ Export to Excel</button>
@@ -190,6 +199,78 @@ $('saveKeyBtn').addEventListener('click', () => {
   $('settingsDetails').open = false;
 });
 refreshKeyUi();
+
+// --- Google Sheets sync (shared duplicate list across devices) ---
+// To hardcode the sync URL so every device works without pasting it in,
+// paste it between the quotes below before uploading to GitHub.
+const HARDCODED_SHEETS_URL = 'https://script.google.com/macros/s/AKfycbykgXEpP8ATfJR3UJpBViVd3qy8A8gJB2BzL9x4K_QS6eNoJsfAG-J0cgFcs3sOwhF-Sw/exec';
+
+const SHEETS_URL_STORAGE = 'sheetsWebAppUrl_v1';
+function getSheetsUrl(){
+  if(HARDCODED_SHEETS_URL && HARDCODED_SHEETS_URL !== 'PASTE_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE'){
+    return HARDCODED_SHEETS_URL;
+  }
+  return localStorage.getItem(SHEETS_URL_STORAGE) || '';
+}
+function refreshSheetsUi(){
+  const url = getSheetsUrl();
+  const details = $('sheetsDetails');
+  const status = $('sheetsUrlStatus');
+  const isHardcoded = url && url === HARDCODED_SHEETS_URL;
+  if(isHardcoded){
+    details.className = 'settings-bar set';
+    details.querySelector('summary').textContent = '🔄 Google Sheets Sync (built in ✓)';
+    details.open = false;
+    status.textContent = 'Using the sync URL built into this app.';
+    return;
+  }
+  if(url){
+    $('sheetsUrlInput').value = url;
+    details.className = 'settings-bar set';
+    details.querySelector('summary').textContent = '🔄 Google Sheets Sync (saved ✓)';
+    status.textContent = '';
+  } else {
+    details.className = 'settings-bar';
+    details.querySelector('summary').textContent = '🔄 Google Sheets Sync URL (needed for multi-device sync)';
+    status.innerHTML = '<span style="color:var(--red);">No sync URL saved — this device will only check duplicates against its own local scans.</span>';
+  }
+}
+$('saveSheetsUrlBtn').addEventListener('click', () => {
+  const val = $('sheetsUrlInput').value.trim();
+  if(!val){ alert('Please paste a valid Apps Script Web App URL.'); return; }
+  localStorage.setItem(SHEETS_URL_STORAGE, val);
+  refreshSheetsUi();
+  $('sheetsDetails').open = false;
+  startSyncPolling();
+});
+refreshSheetsUi();
+
+let syncTimer = null;
+
+async function fetchEntriesFromSheet(){
+  const url = getSheetsUrl();
+  if(!url) return;
+  try{
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if(Array.isArray(data.entries)){
+      entries = data.entries;
+      saveEntries();
+      renderTable();
+      $('syncStatus').innerHTML = '🟢 Synced with other devices · last update ' + new Date().toLocaleTimeString();
+    }
+  }catch(err){
+    $('syncStatus').innerHTML = '<span style="color:var(--red);">🔴 Could not reach shared sheet — showing last known list only.</span>';
+  }
+}
+
+function startSyncPolling(){
+  if(syncTimer) clearInterval(syncTimer);
+  if(!getSheetsUrl()) return;
+  fetchEntriesFromSheet();
+  syncTimer = setInterval(fetchEntriesFromSheet, 7000);
+}
+startSyncPolling();
 
 function normalize(name){
   return name.replace(/\s+/g,'').toLowerCase();
@@ -471,7 +552,7 @@ function checkSimilar(name){
 
 $('nameInput').addEventListener('input', e => checkSimilar(e.target.value));
 
-$('registerBtn').addEventListener('click', () => {
+$('registerBtn').addEventListener('click', async () => {
   const name = $('nameInput').value.trim();
   const title = $('titleInput').value.trim();
   const company = $('companyInput').value.trim();
@@ -479,28 +560,78 @@ $('registerBtn').addEventListener('click', () => {
     alert('Please enter a name before registering.');
     return;
   }
-  const norm = normalize(name);
-  const existing = entries.find(e => normalize(e.name) === norm);
-  const time = new Date().toLocaleTimeString();
 
-  if(existing){
-    entries.push({name, title, company, time, status:'DUPLICATE'});
-    showBanner('dup', `⚠ DUPLICATE — ${name} already received a voucher today (first check-in at ${existing.time}). Do not issue a second voucher.`);
-    playDuplicateAlert();
-  } else {
-    entries.push({name, title, company, time, status:'OK'});
-    showBanner('ok', `✓ ${name} — first time today. Voucher can be issued.`);
+  const btn = $('registerBtn');
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  const sheetsUrl = getSheetsUrl();
+
+  try{
+    if(sheetsUrl){
+      // Shared mode: the Google Sheet is the source of truth, so ask it to check
+      // and append in one step — this avoids two devices both seeing "not a duplicate"
+      // at the same moment.
+      btn.textContent = 'Checking…';
+      const resp = await fetch(sheetsUrl, {
+        method: 'POST',
+        headers: {'Content-Type': 'text/plain'}, // keeps this a "simple request" so Apps Script doesn't need CORS preflight
+        body: JSON.stringify({ name, title, company })
+      });
+      const data = await resp.json();
+      if(data.error) throw new Error(data.error);
+
+      entries.push({ name, title, company, time: data.time, status: data.status });
+      saveEntries();
+
+      if(data.status === 'DUPLICATE'){
+        showBanner('dup', `⚠ DUPLICATE — ${name} already received a voucher today (first check-in at ${data.existingTime}). Do not issue a second voucher.`);
+        playDuplicateAlert();
+      } else {
+        showBanner('ok', `✓ ${name} — first time today. Voucher can be issued.`);
+      }
+    } else {
+      // No sync configured — single-device local-only check.
+      const norm = normalize(name);
+      const existing = entries.find(e => normalize(e.name) === norm);
+      const time = new Date().toLocaleTimeString();
+      if(existing){
+        entries.push({name, title, company, time, status:'DUPLICATE'});
+        showBanner('dup', `⚠ DUPLICATE — ${name} already received a voucher today (first check-in at ${existing.time}). Do not issue a second voucher.`);
+        playDuplicateAlert();
+      } else {
+        entries.push({name, title, company, time, status:'OK'});
+        showBanner('ok', `✓ ${name} — first time today. Voucher can be issued.`);
+      }
+      saveEntries();
+    }
+  }catch(err){
+    // Sync failed (offline / URL wrong) — fall back to a local-only check so staff
+    // isn't blocked, but make it clear this might miss other devices' entries.
+    const norm = normalize(name);
+    const existing = entries.find(e => normalize(e.name) === norm);
+    const time = new Date().toLocaleTimeString();
+    if(existing){
+      entries.push({name, title, company, time, status:'DUPLICATE'});
+      showBanner('dup', `⚠ DUPLICATE (offline check only) — matches a local entry at ${existing.time}. Could not reach shared sheet: ${err.message}`);
+      playDuplicateAlert();
+    } else {
+      entries.push({name, title, company, time, status:'OK'});
+      showBanner('warn', `⚠ Saved on this device only — could not sync to other devices (${err.message}). Check network and try again later.`);
+    }
+    saveEntries();
+  } finally {
+    renderTable();
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+
+    // reset capture UI for next scan
+    $('confirmCard').style.display = 'none';
+    $('preview').style.display = 'none';
+    $('ocrStatus').textContent = '';
+    $('rawTextWrap').style.display = 'none';
+    $('cameraInput').value = '';
+    $('fileInput').value = '';
   }
-  saveEntries();
-  renderTable();
-
-  // reset capture UI for next scan
-  $('confirmCard').style.display = 'none';
-  $('preview').style.display = 'none';
-  $('ocrStatus').textContent = '';
-  $('rawTextWrap').style.display = 'none';
-  $('cameraInput').value = '';
-  $('fileInput').value = '';
 });
 
 $('exportBtn').addEventListener('click', () => {
@@ -516,17 +647,32 @@ $('exportBtn').addEventListener('click', () => {
   XLSX.writeFile(wb, `voucher_checkins_${dateStr}.xlsx`);
 });
 
-$('clearBtn').addEventListener('click', () => {
-  if(entries.length === 0){
+$('clearBtn').addEventListener('click', async () => {
+  const sheetsUrl = getSheetsUrl();
+  if(entries.length === 0 && !sheetsUrl){
     localStorage.removeItem(STORAGE_KEY);
     return;
   }
-  if(confirm('This will permanently clear today\'s check-in list from this device. Export to Excel first if you need a record. Continue?')){
-    entries = [];
-    saveEntries();
-    renderTable();
-    clearBanner();
+  const msg = sheetsUrl
+    ? 'This will permanently clear today\'s check-in list for ALL synced devices (the shared Google Sheet). Export to Excel first if you need a record. Continue?'
+    : 'This will permanently clear today\'s check-in list from this device. Export to Excel first if you need a record. Continue?';
+  if(!confirm(msg)) return;
+
+  if(sheetsUrl){
+    try{
+      await fetch(sheetsUrl, {
+        method: 'POST',
+        headers: {'Content-Type': 'text/plain'},
+        body: JSON.stringify({ action: 'clear' })
+      });
+    }catch(err){
+      alert('Could not reach the shared sheet to clear it (' + err.message + '). Clearing this device only.');
+    }
   }
+  entries = [];
+  saveEntries();
+  renderTable();
+  clearBanner();
 });
 
 renderTable();
