@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Voucher Check-In</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.0.4/tesseract.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root{
+    --green:#1e8e3e; --green-bg:#e6f4ea;
+    --red:#c5221f; --red-bg:#fce8e6;
+    --amber:#b06000; --amber-bg:#fef3e0;
+    --blue:#1a73e8; --border:#dadce0; --text:#202124; --muted:#5f6368;
+  }
+  *{box-sizing:border-box;}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;margin:0;background:#f6f7f9;color:var(--text);}
+  header{background:#fff;border-bottom:1px solid var(--border);padding:14px 16px;position:sticky;top:0;z-index:10;}
+  header h1{font-size:18px;margin:0;}
+  header .sub{font-size:12px;color:var(--muted);margin-top:2px;}
+  main{max-width:640px;margin:0 auto;padding:16px;padding-bottom:80px;}
+  .card{background:#fff;border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:16px;}
+  .card h2{font-size:14px;text-transform:uppercase;letter-spacing:.03em;color:var(--muted);margin:0 0 12px;}
+  button{font-size:15px;font-weight:600;border-radius:8px;border:none;padding:12px 16px;cursor:pointer;}
+  .btn-primary{background:var(--blue);color:#fff;width:100%;}
+  .btn-primary:disabled{background:#9aa0a6;cursor:not-allowed;}
+  .btn-secondary{background:#fff;color:var(--blue);border:1px solid var(--blue);width:100%;}
+  .btn-danger{background:#fff;color:var(--red);border:1px solid var(--red);}
+  .btn-row{display:flex;gap:10px;}
+  .btn-row button{flex:1;}
+  input[type=text]{width:100%;font-size:15px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin-top:4px;}
+  label{font-size:13px;color:var(--muted);font-weight:600;}
+  .field{margin-bottom:12px;}
+  #preview{max-width:100%;border-radius:8px;margin-top:10px;display:none;border:1px solid var(--border);}
+  #ocrStatus{font-size:13px;color:var(--muted);margin-top:8px;min-height:18px;}
+  .banner{padding:14px;border-radius:8px;font-weight:600;margin-bottom:16px;display:none;}
+  .banner.ok{background:var(--green-bg);color:var(--green);display:block;}
+  .banner.dup{background:var(--red-bg);color:var(--red);display:block;}
+  .banner.warn{background:var(--amber-bg);color:var(--amber);display:block;font-weight:500;font-size:13px;}
+  table{width:100%;border-collapse:collapse;font-size:13px;}
+  th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--border);}
+  th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;}
+  tr.dup-row td{color:var(--red);}
+  .count-pill{display:inline-block;background:#e8eaed;border-radius:999px;padding:2px 10px;font-size:12px;font-weight:600;margin-left:6px;}
+  .empty{color:var(--muted);font-size:13px;text-align:center;padding:20px 0;}
+  .raw-text{white-space:pre-wrap;font-size:12px;background:#f1f3f4;border-radius:6px;padding:8px;max-height:120px;overflow:auto;color:var(--muted);margin-top:8px;}
+  details summary{font-size:12px;color:var(--blue);cursor:pointer;margin-top:6px;}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Voucher Check-In</h1>
+  <div class="sub" id="eventDateLabel"></div>
+</header>
+
+<main>
+
+  <div class="banner" id="resultBanner"></div>
+
+  <div class="card">
+    <h2>1. Scan Name Card</h2>
+    <input type="file" accept="image/*" capture="environment" id="cameraInput" style="display:none">
+    <input type="file" accept="image/*" id="fileInput" style="display:none">
+    <div class="btn-row">
+      <button class="btn-primary" id="takePhotoBtn">📷 Take Photo</button>
+      <button class="btn-secondary" id="choosePhotoBtn">🖼 Upload Photo</button>
+    </div>
+    <img id="preview">
+    <div id="ocrStatus"></div>
+    <details id="rawTextWrap" style="display:none;">
+      <summary>Show raw scanned text</summary>
+      <div class="raw-text" id="rawText"></div>
+    </details>
+  </div>
+
+  <div class="card" id="confirmCard" style="display:none;">
+    <h2>2. Confirm Details</h2>
+    <div class="field">
+      <label for="nameInput">Name</label>
+      <input type="text" id="nameInput" placeholder="Edit if OCR got it wrong">
+    </div>
+    <div class="field">
+      <label for="companyInput">Company (optional)</label>
+      <input type="text" id="companyInput" placeholder="Company name">
+    </div>
+    <div id="similarWarning"></div>
+    <button class="btn-primary" id="registerBtn">Check &amp; Register</button>
+  </div>
+
+  <div class="card">
+    <h2>Today's Check-Ins <span class="count-pill" id="countPill">0</span></h2>
+    <div id="tableWrap"><div class="empty">No check-ins yet.</div></div>
+    <div class="btn-row" style="margin-top:14px;">
+      <button class="btn-secondary" id="exportBtn">⬇ Export to Excel</button>
+      <button class="btn-danger" id="clearBtn">🗑 New Event / Clear</button>
+    </div>
+  </div>
+
+</main>
+
+<script>
+const STORAGE_KEY = 'voucherCheckinData_v1';
+let entries = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+let currentImageDataUrl = null;
+
+const $ = id => document.getElementById(id);
+
+function todayLabel(){
+  const d = new Date();
+  return d.toLocaleDateString(undefined,{weekday:'long', year:'numeric', month:'long', day:'numeric'});
+}
+$('eventDateLabel').textContent = todayLabel();
+
+function normalize(name){
+  return name.replace(/\s+/g,'').toLowerCase();
+}
+
+// Simple Levenshtein distance for near-duplicate warning
+function levenshtein(a,b){
+  const m=a.length, n=b.length;
+  const dp = Array.from({length:m+1},(_,i)=>[i,...Array(n).fill(0)]);
+  for(let j=0;j<=n;j++) dp[0][j]=j;
+  for(let i=1;i<=m;i++){
+    for(let j=1;j<=n;j++){
+      dp[i][j] = a[i-1]===b[j-1] ? dp[i-1][j-1] : 1+Math.min(dp[i-1][j-1],dp[i-1][j],dp[i][j-1]);
+    }
+  }
+  return dp[m][n];
+}
+
+function saveEntries(){
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
+}
+
+function renderTable(){
+  $('countPill').textContent = entries.length;
+  if(entries.length === 0){
+    $('tableWrap').innerHTML = '<div class="empty">No check-ins yet.</div>';
+    return;
+  }
+  let rows = entries.slice().reverse().map(e => `
+    <tr class="${e.status==='DUPLICATE' ? 'dup-row' : ''}">
+      <td>${e.time}</td>
+      <td>${escapeHtml(e.name)}</td>
+      <td>${escapeHtml(e.company||'')}</td>
+      <td>${e.status==='DUPLICATE' ? '⚠ Duplicate' : '✓ OK'}</td>
+    </tr>`).join('');
+  $('tableWrap').innerHTML = `<table><thead><tr><th>Time</th><th>Name</th><th>Company</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function escapeHtml(s){
+  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function showBanner(type, text){
+  const b = $('resultBanner');
+  b.className = 'banner ' + type;
+  b.textContent = text;
+}
+
+function clearBanner(){
+  const b = $('resultBanner');
+  b.className = 'banner';
+  b.textContent = '';
+}
+
+// --- Photo capture ---
+$('takePhotoBtn').addEventListener('click', () => $('cameraInput').click());
+$('choosePhotoBtn').addEventListener('click', () => $('fileInput').click());
+$('cameraInput').addEventListener('change', e => handleFile(e.target.files[0]));
+$('fileInput').addEventListener('change', e => handleFile(e.target.files[0]));
+
+function handleFile(file){
+  if(!file) return;
+  clearBanner();
+  $('confirmCard').style.display = 'none';
+  $('rawTextWrap').style.display = 'none';
+  const reader = new FileReader();
+  reader.onload = ev => {
+    currentImageDataUrl = ev.target.result;
+    $('preview').src = currentImageDataUrl;
+    $('preview').style.display = 'block';
+    runOcr(currentImageDataUrl);
+  };
+  reader.readAsDataURL(file);
+}
+
+async function runOcr(dataUrl){
+  $('ocrStatus').textContent = 'Reading name card… this may take a few seconds';
+  try{
+    const result = await Tesseract.recognize(dataUrl, 'chi_sim+chi_tra+eng', {
+      logger: m => {
+        if(m.status === 'recognizing text'){
+          $('ocrStatus').textContent = `Reading name card… ${Math.round(m.progress*100)}%`;
+        }
+      }
+    });
+    const text = result.data.text.trim();
+    $('rawText').textContent = text || '(no text detected)';
+    $('rawTextWrap').style.display = text ? 'block' : 'none';
+    $('ocrStatus').textContent = text ? 'Scan complete. Please confirm the name below.' : 'Could not read text clearly — please type the name manually.';
+
+    const guess = guessName(text);
+    $('nameInput').value = guess.name;
+    $('companyInput').value = guess.company;
+    $('confirmCard').style.display = 'block';
+    checkSimilar(guess.name);
+  }catch(err){
+    $('ocrStatus').textContent = 'OCR failed (' + err.message + '). Please type the name manually.';
+    $('nameInput').value = '';
+    $('companyInput').value = '';
+    $('confirmCard').style.display = 'block';
+  }
+}
+
+// Heuristic: pick the most likely "name" line vs "company" line from OCR text.
+// Personal names on CN business cards are usually short (2-5 chars), on an early line,
+// with no digits/letters. Company lines are usually longer / contain 公司, Ltd, Pte, etc.
+function guessName(text){
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  let name = '', company = '';
+  const companyHints = /(公司|集团|事务所|Pte|Ltd|LLC|Inc|Corp|集團)/i;
+  for(const line of lines){
+    const cleanLine = line.replace(/[|｜.,，。:：\-]/g,'').trim();
+    if(!cleanLine) continue;
+    if(companyHints.test(cleanLine) && !company){
+      company = cleanLine;
+      continue;
+    }
+    const isShortCJK = /^[一-鿿]{2,5}$/.test(cleanLine);
+    const isShortLatin = /^[A-Za-z .'-]{2,30}$/.test(cleanLine) && cleanLine.split(' ').length <= 4;
+    if(!name && (isShortCJK || isShortLatin)){
+      name = cleanLine;
+    }
+  }
+  if(!name && lines.length) name = lines[0].replace(/[|｜.,，。:：\-]/g,'').trim();
+  if(!company){
+    const rest = lines.find(l => l !== name && companyHints.test(l));
+    if(rest) company = rest.trim();
+  }
+  return { name, company };
+}
+
+function checkSimilar(name){
+  const norm = normalize(name);
+  if(!norm){ $('similarWarning').innerHTML=''; return; }
+  const near = entries.find(e => {
+    const en = normalize(e.name);
+    return en !== norm && levenshtein(en, norm) <= 1 && Math.min(en.length, norm.length) > 1;
+  });
+  if(near){
+    $('similarWarning').innerHTML = `<div class="banner warn">Note: a similar name "${escapeHtml(near.name)}" was already checked in today. Please verify this isn't the same person.</div>`;
+  } else {
+    $('similarWarning').innerHTML = '';
+  }
+}
+
+$('nameInput').addEventListener('input', e => checkSimilar(e.target.value));
+
+$('registerBtn').addEventListener('click', () => {
+  const name = $('nameInput').value.trim();
+  const company = $('companyInput').value.trim();
+  if(!name){
+    alert('Please enter a name before registering.');
+    return;
+  }
+  const norm = normalize(name);
+  const existing = entries.find(e => normalize(e.name) === norm);
+  const time = new Date().toLocaleTimeString();
+
+  if(existing){
+    entries.push({name, company, time, status:'DUPLICATE'});
+    showBanner('dup', `⚠ DUPLICATE — ${name} already received a voucher today (first check-in at ${existing.time}). Do not issue a second voucher.`);
+  } else {
+    entries.push({name, company, time, status:'OK'});
+    showBanner('ok', `✓ ${name} — first time today. Voucher can be issued.`);
+  }
+  saveEntries();
+  renderTable();
+
+  // reset capture UI for next scan
+  $('confirmCard').style.display = 'none';
+  $('preview').style.display = 'none';
+  $('ocrStatus').textContent = '';
+  $('rawTextWrap').style.display = 'none';
+  $('cameraInput').value = '';
+  $('fileInput').value = '';
+});
+
+$('exportBtn').addEventListener('click', () => {
+  if(entries.length === 0){ alert('No check-ins to export yet.'); return; }
+  const wsData = [
+    ['Time','Name','Company','Status'],
+    ...entries.map(e => [e.time, e.name, e.company||'', e.status==='DUPLICATE' ? 'DUPLICATE' : 'OK'])
+  ];
+  const ws = XLSX.utils.aoa_to_sheet(wsData);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Check-Ins');
+  const dateStr = new Date().toISOString().slice(0,10);
+  XLSX.writeFile(wb, `voucher_checkins_${dateStr}.xlsx`);
+});
+
+$('clearBtn').addEventListener('click', () => {
+  if(entries.length === 0){
+    localStorage.removeItem(STORAGE_KEY);
+    return;
+  }
+  if(confirm('This will permanently clear today\'s check-in list from this device. Export to Excel first if you need a record. Continue?')){
+    entries = [];
+    saveEntries();
+    renderTable();
+    clearBanner();
+  }
+});
+
+renderTable();
+</script>
+
+</body>
+</html>
