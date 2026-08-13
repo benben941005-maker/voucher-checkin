@@ -132,11 +132,11 @@ $('eventDateLabel').textContent = todayLabel();
 // To hardcode your key so every device using this link works without typing it in,
 // paste it between the quotes below before uploading to GitHub. Leave it blank ('')
 // to keep asking each device to enter its own key via the Settings panel instead.
-const HARDCODED_API_KEY = 'PASTE_YOUR_GOOGLE_VISION_API_KEY_HERE';
+const HARDCODED_API_KEY = 'AIzaSyBZ7CP0Y-LpEglAjk9169NbF3fhh8ZT_dE';
 
 const API_KEY_STORAGE = 'gcvApiKey_v1';
 function getApiKey(){
-  if(HARDCODED_API_KEY && HARDCODED_API_KEY !== 'PASTE_YOUR_GOOGLE_VISION_API_KEY_HERE'){
+  if(HARDCODED_API_KEY && HARDCODED_API_KEY !== 'AIzaSyBZ7CP0Y-LpEglAjk9169NbF3fhh8ZT_dE'){
     return HARDCODED_API_KEY;
   }
   return localStorage.getItem(API_KEY_STORAGE) || '';
