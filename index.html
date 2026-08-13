@@ -4,7 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Voucher Check-In</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.0.4/tesseract.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
   :root{
@@ -45,6 +44,12 @@
   .empty{color:var(--muted);font-size:13px;text-align:center;padding:20px 0;}
   .raw-text{white-space:pre-wrap;font-size:12px;background:#f1f3f4;border-radius:6px;padding:8px;max-height:120px;overflow:auto;color:var(--muted);margin-top:8px;}
   details summary{font-size:12px;color:var(--blue);cursor:pointer;margin-top:6px;}
+  .settings-bar{font-size:12px;color:var(--muted);}
+  .settings-bar.set{color:var(--green);}
+  .settings-bar summary{cursor:pointer;color:var(--blue);}
+  .key-row{display:flex;gap:8px;margin-top:8px;}
+  .key-row input{flex:1;}
+  .key-row button{white-space:nowrap;padding:10px 14px;}
 </style>
 </head>
 <body>
@@ -57,6 +62,17 @@
 <main>
 
   <div class="banner" id="resultBanner"></div>
+
+  <div class="card">
+    <details class="settings-bar" id="settingsDetails">
+      <summary>⚙ Google Vision API Key (needed for scanning)</summary>
+      <div class="key-row">
+        <input type="text" id="apiKeyInput" placeholder="Paste your Google Cloud Vision API key">
+        <button class="btn-secondary" id="saveKeyBtn" style="width:auto;">Save</button>
+      </div>
+      <div id="apiKeyStatus" style="margin-top:6px;"></div>
+    </details>
+  </div>
 
   <div class="card">
     <h2>1. Scan Name Card</h2>
@@ -111,6 +127,52 @@ function todayLabel(){
   return d.toLocaleDateString(undefined,{weekday:'long', year:'numeric', month:'long', day:'numeric'});
 }
 $('eventDateLabel').textContent = todayLabel();
+
+// --- Google Vision API key handling ---
+// To hardcode your key so every device using this link works without typing it in,
+// paste it between the quotes below before uploading to GitHub. Leave it blank ('')
+// to keep asking each device to enter its own key via the Settings panel instead.
+const HARDCODED_API_KEY = 'PASTE_YOUR_GOOGLE_VISION_API_KEY_HERE';
+
+const API_KEY_STORAGE = 'gcvApiKey_v1';
+function getApiKey(){
+  if(HARDCODED_API_KEY && HARDCODED_API_KEY !== 'PASTE_YOUR_GOOGLE_VISION_API_KEY_HERE'){
+    return HARDCODED_API_KEY;
+  }
+  return localStorage.getItem(API_KEY_STORAGE) || '';
+}
+function refreshKeyUi(){
+  const key = getApiKey();
+  const details = $('settingsDetails');
+  const status = $('apiKeyStatus');
+  const isHardcoded = key && key === HARDCODED_API_KEY;
+  if(isHardcoded){
+    details.className = 'settings-bar set';
+    details.querySelector('summary').textContent = '⚙ Google Vision API Key (built in ✓)';
+    details.open = false;
+    status.textContent = 'Using the key built into this app — nothing to set up on this device.';
+    return;
+  }
+  if(key){
+    $('apiKeyInput').value = key;
+    details.className = 'settings-bar set';
+    details.querySelector('summary').textContent = '⚙ Google Vision API Key (saved ✓)';
+    status.textContent = '';
+  } else {
+    details.className = 'settings-bar';
+    details.open = true;
+    details.querySelector('summary').textContent = '⚙ Google Vision API Key (needed for scanning)';
+    status.innerHTML = '<span style="color:var(--red);">No key saved yet — scanning won\'t work until you add one.</span>';
+  }
+}
+$('saveKeyBtn').addEventListener('click', () => {
+  const val = $('apiKeyInput').value.trim();
+  if(!val){ alert('Please paste a valid API key.'); return; }
+  localStorage.setItem(API_KEY_STORAGE, val);
+  refreshKeyUi();
+  $('settingsDetails').open = false;
+});
+refreshKeyUi();
 
 function normalize(name){
   return name.replace(/\s+/g,'').toLowerCase();
@@ -187,16 +249,33 @@ function handleFile(file){
 }
 
 async function runOcr(dataUrl){
-  $('ocrStatus').textContent = 'Reading name card… this may take a few seconds';
+  const apiKey = getApiKey();
+  if(!apiKey){
+    $('ocrStatus').innerHTML = '<span style="color:var(--red);">No Google Vision API key set. Open the settings above to add one, or type the name manually below.</span>';
+    $('nameInput').value = '';
+    $('companyInput').value = '';
+    $('confirmCard').style.display = 'block';
+    return;
+  }
+  $('ocrStatus').textContent = 'Reading name card…';
   try{
-    const result = await Tesseract.recognize(dataUrl, 'chi_sim+chi_tra+eng', {
-      logger: m => {
-        if(m.status === 'recognizing text'){
-          $('ocrStatus').textContent = `Reading name card… ${Math.round(m.progress*100)}%`;
-        }
-      }
+    const base64 = dataUrl.split(',')[1];
+    const resp = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        requests: [{
+          image: { content: base64 },
+          features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
+          imageContext: { languageHints: ['zh', 'en'] }
+        }]
+      })
     });
-    const text = result.data.text.trim();
+    const data = await resp.json();
+    if(data.error){ throw new Error(data.error.message || 'Vision API error'); }
+    const annotation = data.responses && data.responses[0] && data.responses[0].fullTextAnnotation;
+    const text = annotation ? annotation.text.trim() : '';
+
     $('rawText').textContent = text || '(no text detected)';
     $('rawTextWrap').style.display = text ? 'block' : 'none';
     $('ocrStatus').textContent = text ? 'Scan complete. Please confirm the name below.' : 'Could not read text clearly — please type the name manually.';
@@ -207,7 +286,7 @@ async function runOcr(dataUrl){
     $('confirmCard').style.display = 'block';
     checkSimilar(guess.name);
   }catch(err){
-    $('ocrStatus').textContent = 'OCR failed (' + err.message + '). Please type the name manually.';
+    $('ocrStatus').innerHTML = '<span style="color:var(--red);">Scan failed: ' + escapeHtml(err.message) + '. Please type the name manually.</span>';
     $('nameInput').value = '';
     $('companyInput').value = '';
     $('confirmCard').style.display = 'block';
