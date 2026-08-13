@@ -30,16 +30,11 @@
   input[type=text]{width:100%;font-size:15px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin-top:4px;}
   label{font-size:13px;color:var(--muted);font-weight:600;}
   .field{margin-bottom:12px;}
-  #cropContainer{position:relative;display:none;margin-top:10px;user-select:none;touch-action:none;}
-  #preview{max-width:100%;display:block;border-radius:8px;border:1px solid var(--border);}
-  #cropBox{position:absolute;border:2px solid var(--blue);background:rgba(26,115,232,0.15);box-sizing:border-box;cursor:move;}
-  .crop-handle{position:absolute;width:20px;height:20px;margin:-10px;background:var(--blue);border:2px solid #fff;border-radius:50%;box-shadow:0 1px 3px rgba(0,0,0,.3);}
-  .crop-handle.nw{top:0;left:0;cursor:nwse-resize;}
-  .crop-handle.ne{top:0;right:0;left:auto;margin-right:-10px;cursor:nesw-resize;}
-  .crop-handle.sw{bottom:0;top:auto;left:0;margin-bottom:-10px;cursor:nesw-resize;}
-  .crop-handle.se{bottom:0;top:auto;right:0;left:auto;margin-bottom:-10px;margin-right:-10px;cursor:nwse-resize;}
-  .crop-hint{font-size:12px;color:var(--muted);margin-top:8px;display:none;}
-  #scanCropBtn{display:none;margin-top:10px;}
+  #preview{max-width:100%;display:none;border-radius:8px;margin-top:10px;border:1px solid var(--border);}
+  .camera-view{display:none;position:relative;margin-top:10px;background:#000;border-radius:8px;overflow:hidden;}
+  .camera-view video{width:100%;display:block;}
+  .camera-guide{position:absolute;top:18%;left:8%;width:84%;height:64%;border:3px solid #34d399;border-radius:8px;box-shadow:0 0 0 9999px rgba(0,0,0,0.45);pointer-events:none;}
+  .camera-hint{position:absolute;bottom:8px;left:0;right:0;text-align:center;color:#fff;font-size:12px;text-shadow:0 1px 2px rgba(0,0,0,.7);pointer-events:none;}
   #ocrStatus{font-size:13px;color:var(--muted);margin-top:8px;min-height:18px;}
   .banner{padding:14px;border-radius:8px;font-weight:600;margin-bottom:16px;display:none;}
   .banner.ok{background:var(--green-bg);color:var(--green);display:block;}
@@ -91,17 +86,16 @@
       <button class="btn-primary" id="takePhotoBtn">📷 Take Photo</button>
       <button class="btn-secondary" id="choosePhotoBtn">🖼 Upload Photo</button>
     </div>
-    <div id="cropContainer">
-      <img id="preview">
-      <div id="cropBox">
-        <div class="crop-handle nw"></div>
-        <div class="crop-handle ne"></div>
-        <div class="crop-handle sw"></div>
-        <div class="crop-handle se"></div>
-      </div>
+    <div class="camera-view" id="cameraView">
+      <video id="cameraVideo" autoplay playsinline muted></video>
+      <div class="camera-guide"></div>
+      <div class="camera-hint">将姓名对准框内再拍照 / Align the name inside the box, then capture</div>
     </div>
-    <div class="crop-hint" id="cropHint">拖动方框对准姓名区域，排除背景杂物，再点击下面按钮扫描 / Drag the box over just the name area to exclude background clutter, then scan</div>
-    <button class="btn-primary" id="scanCropBtn">🔍 Scan Selected Area</button>
+    <div class="btn-row" id="cameraControls" style="display:none;margin-top:10px;">
+      <button class="btn-primary" id="captureBtn">📸 Capture</button>
+      <button class="btn-danger" id="cancelCameraBtn">✕ Cancel</button>
+    </div>
+    <img id="preview" style="display:none;">
     <div id="ocrStatus"></div>
     <details id="rawTextWrap" style="display:none;">
       <summary>Show raw scanned text</summary>
@@ -239,6 +233,31 @@ function escapeHtml(s){
   return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+// Plays a short two-beep alert tone when a duplicate is detected.
+// Generated with the Web Audio API — no audio file needed, works offline.
+function playDuplicateAlert(){
+  try{
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const now = ctx.currentTime;
+    for(let i = 0; i < 2; i++){
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'square';
+      osc.frequency.value = 330;
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      const start = now + i * 0.28;
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(0.35, start + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.22);
+      osc.start(start);
+      osc.stop(start + 0.24);
+    }
+  }catch(e){
+    // Audio can fail silently (e.g. browser autoplay restrictions) — not critical, banner still shows.
+  }
+}
+
 function showBanner(type, text){
   const b = $('resultBanner');
   b.className = 'banner ' + type;
@@ -252,12 +271,82 @@ function clearBanner(){
 }
 
 // --- Photo capture ---
-$('takePhotoBtn').addEventListener('click', () => $('cameraInput').click());
-$('choosePhotoBtn').addEventListener('click', () => $('fileInput').click());
-$('cameraInput').addEventListener('change', e => handleFile(e.target.files[0]));
-$('fileInput').addEventListener('change', e => handleFile(e.target.files[0]));
+// "Take Photo" opens a live camera view with a FIXED guide frame — the user aligns
+// the card by moving the phone (no manual dragging/cropping needed). Whatever is inside
+// the green frame when they tap Capture is what gets sent to OCR.
+let mediaStream = null;
 
-function handleFile(file){
+$('takePhotoBtn').addEventListener('click', openCamera);
+$('choosePhotoBtn').addEventListener('click', () => $('fileInput').click());
+$('cameraInput').addEventListener('change', e => handleUploadedFile(e.target.files[0])); // fallback only
+$('fileInput').addEventListener('change', e => handleUploadedFile(e.target.files[0]));
+$('cancelCameraBtn').addEventListener('click', closeCamera);
+$('captureBtn').addEventListener('click', captureFromCamera);
+
+async function openCamera(){
+  clearBanner();
+  $('confirmCard').style.display = 'none';
+  $('rawTextWrap').style.display = 'none';
+  $('ocrStatus').textContent = '';
+  $('preview').style.display = 'none';
+
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    $('cameraInput').click(); // browser doesn't support live camera — fall back to native picker
+    return;
+  }
+  try{
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' } },
+      audio: false
+    });
+    const video = $('cameraVideo');
+    video.srcObject = mediaStream;
+    await video.play();
+    $('cameraView').style.display = 'block';
+    $('cameraControls').style.display = 'flex';
+  }catch(err){
+    // Permission denied or no camera — fall back to native camera picker (no fixed frame).
+    $('cameraInput').click();
+  }
+}
+
+function closeCamera(){
+  if(mediaStream){
+    mediaStream.getTracks().forEach(t => t.stop());
+    mediaStream = null;
+  }
+  $('cameraView').style.display = 'none';
+  $('cameraControls').style.display = 'none';
+}
+
+function captureFromCamera(){
+  const video = $('cameraVideo');
+  const guide = document.querySelector('.camera-guide');
+  const videoRect = video.getBoundingClientRect();
+  const guideRect = guide.getBoundingClientRect();
+
+  const scaleX = video.videoWidth / videoRect.width;
+  const scaleY = video.videoHeight / videoRect.height;
+
+  const sx = (guideRect.left - videoRect.left) * scaleX;
+  const sy = (guideRect.top - videoRect.top) * scaleY;
+  const sw = guideRect.width * scaleX;
+  const sh = guideRect.height * scaleY;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = sw;
+  canvas.height = sh;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+
+  closeCamera();
+  $('preview').src = dataUrl;
+  $('preview').style.display = 'block';
+  runOcr(dataUrl);
+}
+
+function handleUploadedFile(file){
   if(!file) return;
   clearBanner();
   $('confirmCard').style.display = 'none';
@@ -265,126 +354,12 @@ function handleFile(file){
   $('ocrStatus').textContent = '';
   const reader = new FileReader();
   reader.onload = ev => {
-    currentImageDataUrl = ev.target.result;
-    const img = $('preview');
-    img.onload = () => initCropBox();
-    img.src = currentImageDataUrl;
-    $('cropContainer').style.display = 'block';
-    $('cropHint').style.display = 'block';
-    $('scanCropBtn').style.display = 'block';
+    $('preview').src = ev.target.result;
+    $('preview').style.display = 'block';
+    runOcr(ev.target.result);
   };
   reader.readAsDataURL(file);
 }
-
-// --- Crop box: lets the user frame just the name area before scanning,
-// so background clutter (other objects, printed forms, glare) gets excluded. ---
-let cropState = null; // {x,y,w,h} in CSS pixels relative to #cropContainer
-
-function initCropBox(){
-  const container = $('cropContainer');
-  const rect = container.getBoundingClientRect();
-  const w = rect.width, h = rect.height;
-  // Default box: centered, 70% of the image — user drags/resizes from there.
-  cropState = { x: w*0.15, y: h*0.15, w: w*0.7, h: h*0.7 };
-  renderCropBox();
-}
-
-function renderCropBox(){
-  if(!cropState) return;
-  const box = $('cropBox');
-  box.style.left = cropState.x + 'px';
-  box.style.top = cropState.y + 'px';
-  box.style.width = cropState.w + 'px';
-  box.style.height = cropState.h + 'px';
-}
-
-(function setupCropDragging(){
-  const container = $('cropContainer');
-  const box = $('cropBox');
-  let mode = null; // 'move' | 'nw' | 'ne' | 'sw' | 'se'
-  let startX, startY, startState;
-
-  function onDown(mode_){
-    return e => {
-      e.preventDefault();
-      mode = mode_;
-      const rect = container.getBoundingClientRect();
-      startX = e.clientX - rect.left;
-      startY = e.clientY - rect.top;
-      startState = { ...cropState };
-      window.addEventListener('pointermove', onMove);
-      window.addEventListener('pointerup', onUp);
-    };
-  }
-
-  function onMove(e){
-    if(!mode) return;
-    const rect = container.getBoundingClientRect();
-    const curX = e.clientX - rect.left;
-    const curY = e.clientY - rect.top;
-    const dx = curX - startX, dy = curY - startY;
-    const minSize = 30;
-    let {x,y,w,h} = startState;
-
-    if(mode === 'move'){
-      x = Math.min(Math.max(0, startState.x + dx), rect.width - w);
-      y = Math.min(Math.max(0, startState.y + dy), rect.height - h);
-    } else {
-      if(mode.includes('n')){ y = startState.y + dy; h = startState.h - dy; }
-      if(mode.includes('s')){ h = startState.h + dy; }
-      if(mode.includes('w')){ x = startState.x + dx; w = startState.w - dx; }
-      if(mode.includes('e')){ w = startState.w + dx; }
-      if(w < minSize){ if(mode.includes('w')) x = startState.x + startState.w - minSize; w = minSize; }
-      if(h < minSize){ if(mode.includes('n')) y = startState.y + startState.h - minSize; h = minSize; }
-      x = Math.max(0, x); y = Math.max(0, y);
-      w = Math.min(w, rect.width - x);
-      h = Math.min(h, rect.height - y);
-    }
-    cropState = {x,y,w,h};
-    renderCropBox();
-  }
-
-  function onUp(){
-    mode = null;
-    window.removeEventListener('pointermove', onMove);
-    window.removeEventListener('pointerup', onUp);
-  }
-
-  box.addEventListener('pointerdown', e => {
-    if(e.target.classList.contains('crop-handle')) return; // handled separately below
-    onDown('move')(e);
-  });
-  box.querySelector('.nw').addEventListener('pointerdown', onDown('nw'));
-  box.querySelector('.ne').addEventListener('pointerdown', onDown('ne'));
-  box.querySelector('.sw').addEventListener('pointerdown', onDown('sw'));
-  box.querySelector('.se').addEventListener('pointerdown', onDown('se'));
-})();
-
-$('scanCropBtn').addEventListener('click', () => {
-  const img = $('preview');
-  const container = $('cropContainer');
-  const rect = container.getBoundingClientRect();
-  const scaleX = img.naturalWidth / rect.width;
-  const scaleY = img.naturalHeight / rect.height;
-
-  const sx = cropState.x * scaleX;
-  const sy = cropState.y * scaleY;
-  const sw = cropState.w * scaleX;
-  const sh = cropState.h * scaleY;
-
-  const canvas = document.createElement('canvas');
-  canvas.width = sw;
-  canvas.height = sh;
-  const ctx = canvas.getContext('2d');
-  ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
-  const croppedDataUrl = canvas.toDataURL('image/jpeg', 0.92);
-
-  $('cropContainer').style.display = 'none';
-  $('cropHint').style.display = 'none';
-  $('scanCropBtn').style.display = 'none';
-
-  runOcr(croppedDataUrl);
-});
 
 async function runOcr(dataUrl){
   const apiKey = getApiKey();
@@ -511,6 +486,7 @@ $('registerBtn').addEventListener('click', () => {
   if(existing){
     entries.push({name, title, company, time, status:'DUPLICATE'});
     showBanner('dup', `⚠ DUPLICATE — ${name} already received a voucher today (first check-in at ${existing.time}). Do not issue a second voucher.`);
+    playDuplicateAlert();
   } else {
     entries.push({name, title, company, time, status:'OK'});
     showBanner('ok', `✓ ${name} — first time today. Voucher can be issued.`);
@@ -520,14 +496,11 @@ $('registerBtn').addEventListener('click', () => {
 
   // reset capture UI for next scan
   $('confirmCard').style.display = 'none';
-  $('cropContainer').style.display = 'none';
-  $('cropHint').style.display = 'none';
-  $('scanCropBtn').style.display = 'none';
+  $('preview').style.display = 'none';
   $('ocrStatus').textContent = '';
   $('rawTextWrap').style.display = 'none';
   $('cameraInput').value = '';
   $('fileInput').value = '';
-  cropState = null;
 });
 
 $('exportBtn').addEventListener('click', () => {
