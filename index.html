@@ -97,6 +97,10 @@
       <input type="text" id="nameInput" placeholder="Edit if OCR got it wrong">
     </div>
     <div class="field">
+      <label for="titleInput">Title / Position (optional)</label>
+      <input type="text" id="titleInput" placeholder="e.g. 董事经理">
+    </div>
+    <div class="field">
       <label for="companyInput">Company (optional)</label>
       <input type="text" id="companyInput" placeholder="Company name">
     </div>
@@ -205,10 +209,11 @@ function renderTable(){
     <tr class="${e.status==='DUPLICATE' ? 'dup-row' : ''}">
       <td>${e.time}</td>
       <td>${escapeHtml(e.name)}</td>
+      <td>${escapeHtml(e.title||'')}</td>
       <td>${escapeHtml(e.company||'')}</td>
       <td>${e.status==='DUPLICATE' ? '⚠ Duplicate' : '✓ OK'}</td>
     </tr>`).join('');
-  $('tableWrap').innerHTML = `<table><thead><tr><th>Time</th><th>Name</th><th>Company</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`;
+  $('tableWrap').innerHTML = `<table><thead><tr><th>Time</th><th>Name</th><th>Title</th><th>Company</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 function escapeHtml(s){
@@ -282,12 +287,14 @@ async function runOcr(dataUrl){
 
     const guess = guessName(text);
     $('nameInput').value = guess.name;
+    $('titleInput').value = guess.title;
     $('companyInput').value = guess.company;
     $('confirmCard').style.display = 'block';
     checkSimilar(guess.name);
   }catch(err){
     $('ocrStatus').innerHTML = '<span style="color:var(--red);">Scan failed: ' + escapeHtml(err.message) + '. Please type the name manually.</span>';
     $('nameInput').value = '';
+    $('titleInput').value = '';
     $('companyInput').value = '';
     $('confirmCard').style.display = 'block';
   }
@@ -307,6 +314,7 @@ function guessName(text){
   const brandHints = /^(Deloitte|PwC|KPMG|EY|Ernst\s*&\s*Young|Accenture)\.?$/i;
 
   let company = '';
+  let title = '';
   const cjkCandidates = [];
   const latinCandidates = [];
 
@@ -315,7 +323,10 @@ function guessName(text){
       if(!company) company = line;
       continue;
     }
-    if(titleHints.test(line)) continue;
+    if(titleHints.test(line)){
+      if(!title) title = line;
+      continue;
+    }
     if(brandHints.test(line)) continue;
 
     const isShortCJK = /^[一-鿿]{2,5}$/.test(line);
@@ -330,10 +341,10 @@ function guessName(text){
   if(!name && lines.length) name = lines[0];
 
   if(!company){
-    const rest = lines.find(l => l !== name && companyHints.test(l));
+    const rest = lines.find(l => l !== name && l !== title && companyHints.test(l));
     if(rest) company = rest;
   }
-  return { name, company };
+  return { name, title, company };
 }
 
 function checkSimilar(name){
@@ -354,6 +365,7 @@ $('nameInput').addEventListener('input', e => checkSimilar(e.target.value));
 
 $('registerBtn').addEventListener('click', () => {
   const name = $('nameInput').value.trim();
+  const title = $('titleInput').value.trim();
   const company = $('companyInput').value.trim();
   if(!name){
     alert('Please enter a name before registering.');
@@ -364,10 +376,10 @@ $('registerBtn').addEventListener('click', () => {
   const time = new Date().toLocaleTimeString();
 
   if(existing){
-    entries.push({name, company, time, status:'DUPLICATE'});
+    entries.push({name, title, company, time, status:'DUPLICATE'});
     showBanner('dup', `⚠ DUPLICATE — ${name} already received a voucher today (first check-in at ${existing.time}). Do not issue a second voucher.`);
   } else {
-    entries.push({name, company, time, status:'OK'});
+    entries.push({name, title, company, time, status:'OK'});
     showBanner('ok', `✓ ${name} — first time today. Voucher can be issued.`);
   }
   saveEntries();
@@ -385,8 +397,8 @@ $('registerBtn').addEventListener('click', () => {
 $('exportBtn').addEventListener('click', () => {
   if(entries.length === 0){ alert('No check-ins to export yet.'); return; }
   const wsData = [
-    ['Time','Name','Company','Status'],
-    ...entries.map(e => [e.time, e.name, e.company||'', e.status==='DUPLICATE' ? 'DUPLICATE' : 'OK'])
+    ['Time','Name','Title','Company','Status'],
+    ...entries.map(e => [e.time, e.name, e.title||'', e.company||'', e.status==='DUPLICATE' ? 'DUPLICATE' : 'OK'])
   ];
   const ws = XLSX.utils.aoa_to_sheet(wsData);
   const wb = XLSX.utils.book_new();
