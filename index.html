@@ -132,11 +132,11 @@ $('eventDateLabel').textContent = todayLabel();
 // To hardcode your key so every device using this link works without typing it in,
 // paste it between the quotes below before uploading to GitHub. Leave it blank ('')
 // to keep asking each device to enter its own key via the Settings panel instead.
-const HARDCODED_API_KEY = 'AIzaSyBZ7CP0Y-LpEglAjk9169NbF3fhh8ZT_dE';
+const HARDCODED_API_KEY = 'PASTE_YOUR_GOOGLE_VISION_API_KEY_HERE';
 
 const API_KEY_STORAGE = 'gcvApiKey_v1';
 function getApiKey(){
-  if(HARDCODED_API_KEY && HARDCODED_API_KEY !== 'AIzaSyBZ7CP0Y-LpEglAjk9169NbF3fhh8ZT_dE'){
+  if(HARDCODED_API_KEY && HARDCODED_API_KEY !== 'PASTE_YOUR_GOOGLE_VISION_API_KEY_HERE'){
     return HARDCODED_API_KEY;
   }
   return localStorage.getItem(API_KEY_STORAGE) || '';
@@ -297,26 +297,41 @@ async function runOcr(dataUrl){
 // Personal names on CN business cards are usually short (2-5 chars), on an early line,
 // with no digits/letters. Company lines are usually longer / contain 公司, Ltd, Pte, etc.
 function guessName(text){
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-  let name = '', company = '';
-  const companyHints = /(公司|集团|事务所|Pte|Ltd|LLC|Inc|Corp|集團)/i;
+  const rawLines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  const lines = rawLines.map(l => l.replace(/[|｜.,，。:：\-]/g,'').trim()).filter(Boolean);
+
+  const companyHints = /(公司|集团|集團|事务所|事務所|Pte|Ltd|LLC|Inc|Corp)/i;
+  // Job-title words — these sit right next to the name on a card but are not the name itself.
+  const titleHints = /(经理|經理|总监|總監|总裁|總裁|董事|主任|主管|顾问|顧問|工程师|工程師|专员|專員|助理|秘书|秘書|CEO|CFO|CTO|COO|Manager|Director|President|Officer|Founder)/i;
+  // Common logo/brand text that shouldn't be mistaken for a person's name.
+  const brandHints = /^(Deloitte|PwC|KPMG|EY|Ernst\s*&\s*Young|Accenture)\.?$/i;
+
+  let company = '';
+  const cjkCandidates = [];
+  const latinCandidates = [];
+
   for(const line of lines){
-    const cleanLine = line.replace(/[|｜.,，。:：\-]/g,'').trim();
-    if(!cleanLine) continue;
-    if(companyHints.test(cleanLine) && !company){
-      company = cleanLine;
+    if(companyHints.test(line)){
+      if(!company) company = line;
       continue;
     }
-    const isShortCJK = /^[一-鿿]{2,5}$/.test(cleanLine);
-    const isShortLatin = /^[A-Za-z .'-]{2,30}$/.test(cleanLine) && cleanLine.split(' ').length <= 4;
-    if(!name && (isShortCJK || isShortLatin)){
-      name = cleanLine;
-    }
+    if(titleHints.test(line)) continue;
+    if(brandHints.test(line)) continue;
+
+    const isShortCJK = /^[一-鿿]{2,5}$/.test(line);
+    const isShortLatin = /^[A-Za-z .'-]{2,30}$/.test(line) && line.split(' ').length <= 4;
+    if(isShortCJK) cjkCandidates.push(line);
+    else if(isShortLatin) latinCandidates.push(line);
   }
-  if(!name && lines.length) name = lines[0].replace(/[|｜.,，。:：\-]/g,'').trim();
+
+  // Prefer a Chinese name line over a Latin/brand line — Chinese business cards
+  // usually show the personal name in CJK even when the logo/company is in English.
+  let name = cjkCandidates[0] || latinCandidates[0] || '';
+  if(!name && lines.length) name = lines[0];
+
   if(!company){
     const rest = lines.find(l => l !== name && companyHints.test(l));
-    if(rest) company = rest.trim();
+    if(rest) company = rest;
   }
   return { name, company };
 }
