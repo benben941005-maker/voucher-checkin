@@ -401,9 +401,34 @@ function escapeHtml(s){
 // Two distinct tones, both generated with the Web Audio API (no audio files, works offline):
 //  - a single pleasant high chime for a successful (non-duplicate) registration
 //  - a two-beep low buzzer for a duplicate / error condition
+//
+// Both share ONE AudioContext instead of creating a new one per call. Safari
+// (especially iOS Safari, which is what most phones scanning at a check-in
+// desk will use) caps how many AudioContexts can exist at once — after
+// several successful scans each spun up their own never-closed context, the
+// browser silently refused to create any more, which is why the success tone
+// kept working (its contexts were created early) while the error tone went
+// silent later in a session (its context creation failed and was swallowed
+// by the catch block). Reusing one context avoids hitting that ceiling.
+let sharedAudioCtx = null;
+function getAudioCtx(){
+  try{
+    if(!sharedAudioCtx){
+      sharedAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if(sharedAudioCtx.state === 'suspended'){
+      sharedAudioCtx.resume().catch(() => {});
+    }
+    return sharedAudioCtx;
+  }catch(e){
+    return null;
+  }
+}
+
 function playSuccessTone(){
   try{
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = getAudioCtx();
+    if(!ctx) return;
     const now = ctx.currentTime;
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
@@ -423,7 +448,8 @@ function playSuccessTone(){
 
 function playErrorTone(){
   try{
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = getAudioCtx();
+    if(!ctx) return;
     const now = ctx.currentTime;
     for(let i = 0; i < 2; i++){
       const osc = ctx.createOscillator();
