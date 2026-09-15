@@ -1,0 +1,73 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Inject secrets into index.html
+        env:
+          GCV_API_KEY: ${{ secrets.GCV_API_KEY }}
+          FIREBASE_CONFIG_JSON: ${{ secrets.FIREBASE_CONFIG_JSON }}
+        run: |
+          python3 - <<'PYEOF'
+          import json
+          import os
+          import pathlib
+
+          path = pathlib.Path("index.html")
+          html = path.read_text(encoding="utf-8")
+
+          api_key = os.environ.get("GCV_API_KEY", "")
+          fb_json = os.environ.get("FIREBASE_CONFIG_JSON", "")
+
+          # Fail the build loudly if the Firebase secret isn't valid JSON,
+          # rather than silently shipping a broken page.
+          if fb_json:
+              json.loads(fb_json)
+
+          api_placeholder = "'__GCV_API_KEY_PLACEHOLDER__'"
+          fb_placeholder = "'__FIREBASE_CONFIG_PLACEHOLDER__'"
+
+          if api_placeholder not in html:
+              raise SystemExit("API key placeholder not found in index.html — did the file change?")
+          if fb_placeholder not in html:
+              raise SystemExit("Firebase config placeholder not found in index.html — did the file change?")
+
+          html = html.replace(api_placeholder, json.dumps(api_key))
+          html = html.replace(fb_placeholder, json.dumps(fb_json))
+
+          path.write_text(html, encoding="utf-8")
+          print("Secrets injected.")
+          PYEOF
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
