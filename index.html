@@ -178,7 +178,14 @@ const HARDCODED_API_KEY = '__GCV_API_KEY_PLACEHOLDER__';
 
 const API_KEY_STORAGE = 'gcvApiKey_v1';
 function getApiKey(){
-  if(HARDCODED_API_KEY && HARDCODED_API_KEY !== '__GCV_API_KEY_PLACEHOLDER__'){
+  // Checks for the substring "PLACEHOLDER" rather than the exact placeholder
+  // text on purpose: the deploy workflow's find-and-replace matches every
+  // occurrence of the exact placeholder string, so repeating it here verbatim
+  // would get overwritten too and this check would end up comparing the real
+  // key against itself (always "not a match") — silently breaking hardcoding
+  // even when the secret was injected correctly. This shorter, different
+  // substring is never touched by that replace.
+  if(HARDCODED_API_KEY && HARDCODED_API_KEY.indexOf('PLACEHOLDER') === -1){
     return HARDCODED_API_KEY;
   }
   return localStorage.getItem(API_KEY_STORAGE) || '';
@@ -231,7 +238,9 @@ refreshKeyUi();
 // below fails harmlessly, falling back to each device pasting its own config.
 const HARDCODED_FIREBASE_CONFIG_RAW = '__FIREBASE_CONFIG_PLACEHOLDER__';
 const HARDCODED_FIREBASE_CONFIG = (function(){
-  if(!HARDCODED_FIREBASE_CONFIG_RAW || HARDCODED_FIREBASE_CONFIG_RAW === '__FIREBASE_CONFIG_PLACEHOLDER__') return null;
+  // No separate "is this still the placeholder?" check on purpose: the literal
+  // placeholder text isn't valid JSON, so JSON.parse fails harmlessly and falls
+  // through to null on its own when the build-time substitution hasn't run.
   try{ return JSON.parse(HARDCODED_FIREBASE_CONFIG_RAW); }catch(e){ return null; }
 })();
 
