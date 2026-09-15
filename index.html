@@ -716,6 +716,14 @@ $('registerBtn').addEventListener('click', async () => {
   const originalLabel = btn.textContent;
   btn.disabled = true;
 
+  // Unlock/create the shared AudioContext HERE, synchronously, in direct response
+  // to the tap — before any "await" below. iOS Safari only allows audio to start
+  // as a direct result of a user gesture; once the transaction below is awaited,
+  // playing a tone afterwards no longer counts as gesture-triggered and Safari
+  // silently blocks it. Calling this now "unlocks" the context so the tones
+  // played later (after the network round-trip) are still audible.
+  getAudioCtx();
+
   try{
     if(db){
       btn.textContent = 'Checking…';
