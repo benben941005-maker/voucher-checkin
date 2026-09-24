@@ -84,9 +84,9 @@
 
   <div class="card">
     <details class="settings-bar" id="settingsDetails">
-      <summary>⚙ Google Vision API Key (needed for scanning)</summary>
+      <summary>⚙ Gemini API Key (needed for scanning)</summary>
       <div class="key-row">
-        <input type="text" id="apiKeyInput" placeholder="Paste your Google Cloud Vision API key">
+        <input type="text" id="apiKeyInput" placeholder="Paste your Gemini API key (from Google AI Studio)">
         <button class="btn-secondary" id="saveKeyBtn" style="width:auto;">Save</button>
       </div>
       <div id="apiKeyStatus" style="margin-top:6px;"></div>
@@ -134,11 +134,7 @@
       <input type="text" id="nameInput" placeholder="Edit if OCR got it wrong">
     </div>
     <div class="field">
-      <label for="titleInput">Title / Position (optional, check-in only)</label>
-      <input type="text" id="titleInput" placeholder="e.g. 董事经理">
-    </div>
-    <div class="field">
-      <label for="companyInput">Company (optional, check-in only)</label>
+      <label for="companyInput">Company / Organization (auto-filled if matched with registration, check-in only)</label>
       <input type="text" id="companyInput" placeholder="Company name">
     </div>
     <div id="registrationMatchNote" style="display:none;font-size:12px;color:var(--green);background:var(--green-bg);padding:8px 10px;border-radius:8px;margin-bottom:12px;"></div>
@@ -232,7 +228,7 @@ function refreshKeyUi(){
   const isHardcoded = key && key === HARDCODED_API_KEY;
   if(isHardcoded){
     details.className = 'settings-bar set';
-    details.querySelector('summary').textContent = '⚙ Google Vision API Key (built in ✓)';
+    details.querySelector('summary').textContent = '⚙ Gemini API Key (built in ✓)';
     details.open = false;
     status.textContent = 'Using the key built into this app — nothing to set up on this device.';
     return;
@@ -240,12 +236,12 @@ function refreshKeyUi(){
   if(key){
     $('apiKeyInput').value = key;
     details.className = 'settings-bar set';
-    details.querySelector('summary').textContent = '⚙ Google Vision API Key (saved ✓)';
+    details.querySelector('summary').textContent = '⚙ Gemini API Key (saved ✓)';
     status.textContent = '';
   } else {
     details.className = 'settings-bar';
     details.open = true;
-    details.querySelector('summary').textContent = '⚙ Google Vision API Key (needed for scanning)';
+    details.querySelector('summary').textContent = '⚙ Gemini API Key (needed for scanning)';
     status.innerHTML = '<span style="color:var(--red);">No key saved yet — scanning won\'t work until you add one.</span>';
   }
 }
@@ -421,11 +417,9 @@ function applyRegistrationMatch(match){
     note.innerHTML = '';
     return;
   }
-  // Only fill in fields the user hasn't already typed something into —
+  // Only fill in the field if the user hasn't already typed something into it —
   // never silently overwrite a manual correction.
-  const titleInput = $('titleInput');
   const companyInput = $('companyInput');
-  if(!titleInput.value.trim() && match.position) titleInput.value = match.position;
   if(!companyInput.value.trim() && match.organization) companyInput.value = match.organization;
 
   const parts = [];
@@ -482,7 +476,6 @@ function renderTable(){
       : '<span class="muted-dash">—</span>';
     return `<tr>
       <td>${escapeHtml(e.name)}</td>
-      <td>${escapeHtml(e.title||'')}</td>
       <td>${escapeHtml(e.company||'')}</td>
       <td>${fmtTime(e.checkInAtMs)}</td>
       <td>${fmtTime(e.checkOutAtMs)}</td>
@@ -490,7 +483,7 @@ function renderTable(){
       <td>${sigIn}${sigOut}</td>
     </tr>`;
   }).join('');
-  $('tableWrap').innerHTML = `<table><thead><tr><th>Name</th><th>Title</th><th>Company</th><th>Check-In</th><th>Check-Out</th><th>Status</th><th>Signatures</th></tr></thead><tbody>${rows}</tbody></table>`;
+  $('tableWrap').innerHTML = `<table><thead><tr><th>Name</th><th>Company</th><th>Check-In</th><th>Check-Out</th><th>Status</th><th>Signatures</th></tr></thead><tbody>${rows}</tbody></table>`;
   $('tableWrap').querySelectorAll('.sig-thumb').forEach(img => {
     img.addEventListener('click', () => openSigView(img.src, img.getAttribute('data-sig-label')));
   });
@@ -669,10 +662,18 @@ function handleUploadedFile(file){
   reader.readAsDataURL(file);
 }
 
+// Uses Gemini (a multimodal AI model) instead of a plain glyph-by-glyph OCR
+// engine. Gemini reads the whole card with context, so it does noticeably
+// better on rare/complex Chinese characters than character-by-character OCR —
+// and it can hand back the name directly instead of us guessing which text
+// line is the name vs. the company/title from a wall of raw OCR text.
+// Company is intentionally NOT extracted here anymore: it's only ever filled
+// in from a matching conference registration (see applyRegistrationMatch),
+// or typed in manually.
 async function runOcr(dataUrl){
   const apiKey = getApiKey();
   if(!apiKey){
-    $('ocrStatus').innerHTML = '<span style="color:var(--red);">No Google Vision API key set. Open the settings above to add one, or type the name manually below.</span>';
+    $('ocrStatus').innerHTML = '<span style="color:var(--red);">No Gemini API key set. Open the settings above to add one, or type the name manually below.</span>';
     $('nameInput').value = '';
     $('companyInput').value = '';
     $('confirmCard').style.display = 'block';
@@ -682,88 +683,60 @@ async function runOcr(dataUrl){
   $('ocrStatus').textContent = 'Reading name card…';
   try{
     const base64 = dataUrl.split(',')[1];
-    const resp = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`, {
+    const mimeMatch = /^data:([^;]+);base64,/.exec(dataUrl);
+    const mimeType = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+
+    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
-        requests: [{
-          image: { content: base64 },
-          features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
-          imageContext: { languageHints: ['zh-Hant', 'zh', 'en'] }
-        }]
+        contents: [{
+          parts: [
+            { text: 'This image shows a business/name card, possibly printed in Chinese, English, or both. Find the individual PERSON\'s name on the card — not the company/organization name and not a job title. Transcribe it exactly as printed, in its original script (keep Chinese characters as Chinese characters). If no personal name is clearly visible, return an empty string. Respond with only the JSON object matching the schema, nothing else.' },
+            { inline_data: { mime_type: mimeType, data: base64 } }
+          ]
+        }],
+        generationConfig: {
+          temperature: 0,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: 'OBJECT',
+            properties: { name: { type: 'STRING' } },
+            required: ['name']
+          }
+        }
       })
     });
     const data = await resp.json();
-    if(data.error){ throw new Error(data.error.message || 'Vision API error'); }
-    const annotation = data.responses && data.responses[0] && data.responses[0].fullTextAnnotation;
-    const text = annotation ? annotation.text.trim() : '';
+    if(data.error){ throw new Error(data.error.message || 'Gemini API error'); }
 
-    $('rawText').textContent = text || '(no text detected)';
-    $('rawTextWrap').style.display = text ? 'block' : 'none';
-    $('ocrStatus').textContent = text ? 'Scan complete. Please confirm the name below.' : 'Could not read text clearly — please type the name manually.';
+    const rawText = (data.candidates && data.candidates[0] && data.candidates[0].content &&
+      data.candidates[0].content.parts && data.candidates[0].content.parts[0] &&
+      data.candidates[0].content.parts[0].text) || '';
 
-    const guess = guessName(text);
-    $('nameInput').value = guess.name;
-    $('titleInput').value = guess.title;
-    $('companyInput').value = guess.company;
+    let name = '';
+    try{
+      name = (JSON.parse(rawText).name || '').trim();
+    }catch(e){
+      name = rawText.trim();
+    }
+
+    $('rawText').textContent = rawText || '(no response)';
+    $('rawTextWrap').style.display = rawText ? 'block' : 'none';
+    $('ocrStatus').textContent = name ? 'Scan complete. Please confirm the name below.' : 'Could not read a name clearly — please type it manually.';
+
+    $('nameInput').value = name;
+    $('companyInput').value = '';
     $('confirmCard').style.display = 'block';
-    checkSimilar(guess.name);
-    applyRegistrationMatch(findRegistrationMatch(guess.name));
+    checkSimilar(name);
+    applyRegistrationMatch(findRegistrationMatch(name));
   }catch(err){
     $('ocrStatus').innerHTML = '<span style="color:var(--red);">Scan failed: ' + escapeHtml(err.message) + '. Please type the name manually.</span>';
     $('nameInput').value = '';
-    $('titleInput').value = '';
     $('companyInput').value = '';
     $('confirmCard').style.display = 'block';
     applyRegistrationMatch(null);
   }
-}
-
-// Heuristic: pick the most likely "name" line vs "company" line from OCR text.
-// Personal names on CN business cards are usually short (2-5 chars), on an early line,
-// with no digits/letters. Company lines are usually longer / contain 公司, Ltd, Pte, etc.
-function guessName(text){
-  const rawLines = text.split('\n').map(l => l.trim()).filter(Boolean);
-  const lines = rawLines.map(l => l.replace(/[|｜.,，。:：\-]/g,'').trim()).filter(Boolean);
-
-  const companyHints = /(公司|集团|集團|事务所|事務所|Pte|Ltd|LLC|Inc|Corp)/i;
-  // Job-title words — these sit right next to the name on a card but are not the name itself.
-  const titleHints = /(经理|經理|总监|總監|总裁|總裁|董事|主任|主管|顾问|顧問|工程师|工程師|专员|專員|助理|秘书|秘書|CEO|CFO|CTO|COO|Manager|Director|President|Officer|Founder)/i;
-  // Common logo/brand text that shouldn't be mistaken for a person's name.
-  const brandHints = /^(Deloitte|PwC|KPMG|EY|Ernst\s*&\s*Young|Accenture)\.?$/i;
-
-  let company = '';
-  let title = '';
-  const cjkCandidates = [];
-  const latinCandidates = [];
-
-  for(const line of lines){
-    if(companyHints.test(line)){
-      if(!company) company = line;
-      continue;
-    }
-    if(titleHints.test(line)){
-      if(!title) title = line;
-      continue;
-    }
-    if(brandHints.test(line)) continue;
-
-    const isShortCJK = /^[一-鿿]{2,5}$/.test(line);
-    const isShortLatin = /^[A-Za-z .'-]{2,30}$/.test(line) && line.split(' ').length <= 4;
-    if(isShortCJK) cjkCandidates.push(line);
-    else if(isShortLatin) latinCandidates.push(line);
-  }
-
-  // Prefer a Chinese name line over a Latin/brand line — Chinese business cards
-  // usually show the personal name in CJK even when the logo/company is in English.
-  let name = cjkCandidates[0] || latinCandidates[0] || '';
-  if(!name && lines.length) name = lines[0];
-
-  if(!company){
-    const rest = lines.find(l => l !== name && l !== title && companyHints.test(l));
-    if(rest) company = rest;
-  }
-  return { name, title, company };
 }
 
 function checkSimilar(name){
@@ -867,7 +840,7 @@ function resetCaptureUi(){
 // Atomic check-and-create: uses the normalized name as a fixed Firestore document ID
 // inside a transaction, so two devices racing to register the same person resolve
 // against a single document instead of a whole-sheet lock — typically well under a second.
-async function checkInWithFirebase(name, title, company, signature, registrationInfo){
+async function checkInWithFirebase(name, company, signature, registrationInfo){
   const norm = normalize(name);
   const docId = eventId + '__' + norm;
   const ref = db.collection('checkins').doc(docId);
@@ -878,14 +851,13 @@ async function checkInWithFirebase(name, title, company, signature, registration
       return { duplicate: true, existingCheckInAtMs: snap.data().checkInAtMs };
     }
     tx.set(ref, {
-      name, title, company, eventId, norm,
+      name, company, eventId, norm,
       checkInAtMs: nowMs,
       checkOutAtMs: null,
       checkInSignature: signature || null,
       checkOutSignature: null,
       // Filled in only when the scanned/typed name matched an entry in the
       // separate conference registration form — otherwise left blank.
-      country: (registrationInfo && registrationInfo.country) || '',
       mobile: (registrationInfo && registrationInfo.mobile) || '',
       email: (registrationInfo && registrationInfo.email) || '',
       physicianNo: (registrationInfo && registrationInfo.physicianNo) || ''
@@ -917,7 +889,6 @@ async function checkOutWithFirebase(name, signature){
 
 $('checkinActionBtn').addEventListener('click', async () => {
   const name = $('nameInput').value.trim();
-  const title = $('titleInput').value.trim();
   const company = $('companyInput').value.trim();
   if(!name){
     alert('Please enter a name before checking in.');
@@ -942,7 +913,7 @@ $('checkinActionBtn').addEventListener('click', async () => {
   try{
     if(db){
       btn.textContent = 'Checking…';
-      const result = await checkInWithFirebase(name, title, company, signature, registrationMatch);
+      const result = await checkInWithFirebase(name, company, signature, registrationMatch);
       if(result.duplicate){
         showBanner('dup', `⚠ DUPLICATE — ${name} already checked in today at ${fmtTime(result.existingCheckInAtMs)}. Do not issue a second voucher.`);
         playErrorTone();
@@ -961,10 +932,9 @@ $('checkinActionBtn').addEventListener('click', async () => {
         playErrorTone();
       } else {
         entries.push({
-          id: eventId + '__' + norm, name, title, company,
+          id: eventId + '__' + norm, name, company,
           checkInAtMs: nowMs, checkOutAtMs: null,
           checkInSignature: signature, checkOutSignature: null,
-          country: (registrationMatch && registrationMatch.country) || '',
           mobile: (registrationMatch && registrationMatch.mobile) || '',
           email: (registrationMatch && registrationMatch.email) || '',
           physicianNo: (registrationMatch && registrationMatch.physicianNo) || ''
@@ -1059,11 +1029,11 @@ $('exportBtn').addEventListener('click', async () => {
   try{
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Check-Ins');
-    const headers = ['Name','Title','Company','Country','Mobile No.','Email','Physician Reg. No.','Check-In Time','Check-Out Time','Status','Check-In Signature','Check-Out Signature'];
+    const headers = ['Name','Company','Mobile No.','Email','Physician Reg. No.','Check-In Time','Check-Out Time','Status','Check-In Signature','Check-Out Signature'];
     sheet.addRow(headers);
     sheet.getRow(1).font = { bold: true };
     sheet.columns = [
-      { width: 20 }, { width: 16 }, { width: 20 }, { width: 14 }, { width: 16 },
+      { width: 20 }, { width: 20 }, { width: 16 },
       { width: 22 }, { width: 18 }, { width: 20 }, { width: 20 },
       { width: 14 }, { width: 20 }, { width: 20 }
     ];
@@ -1072,9 +1042,7 @@ $('exportBtn').addEventListener('click', async () => {
       const rowIndex = i + 2; // header occupies row 1
       sheet.addRow([
         e.name,
-        e.title || '',
         e.company || '',
-        e.country || '',
         e.mobile || '',
         e.email || '',
         e.physicianNo || '',
@@ -1088,12 +1056,12 @@ $('exportBtn').addEventListener('click', async () => {
       const sigIn = dataUrlToBase64AndExt(e.checkInSignature);
       if(sigIn){
         const imgId = workbook.addImage({ base64: sigIn.base64, extension: sigIn.extension });
-        sheet.addImage(imgId, { tl: { col: 10.05, row: rowIndex - 1 + 0.05 }, ext: { width: 140, height: 45 } });
+        sheet.addImage(imgId, { tl: { col: 8.05, row: rowIndex - 1 + 0.05 }, ext: { width: 140, height: 45 } });
       }
       const sigOut = dataUrlToBase64AndExt(e.checkOutSignature);
       if(sigOut){
         const imgId = workbook.addImage({ base64: sigOut.base64, extension: sigOut.extension });
-        sheet.addImage(imgId, { tl: { col: 11.05, row: rowIndex - 1 + 0.05 }, ext: { width: 140, height: 45 } });
+        sheet.addImage(imgId, { tl: { col: 9.05, row: rowIndex - 1 + 0.05 }, ext: { width: 140, height: 45 } });
       }
     });
 
