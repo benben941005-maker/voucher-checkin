@@ -84,9 +84,9 @@
 
   <div class="card">
     <details class="settings-bar" id="settingsDetails">
-      <summary>⚙ Gemini API Key (needed for scanning)</summary>
+      <summary>⚙ Google Vision API Key (needed for scanning)</summary>
       <div class="key-row">
-        <input type="text" id="apiKeyInput" placeholder="Paste your Gemini API key (from Google AI Studio)">
+        <input type="text" id="apiKeyInput" placeholder="Paste your Google Cloud Vision API key">
         <button class="btn-secondary" id="saveKeyBtn" style="width:auto;">Save</button>
       </div>
       <div id="apiKeyStatus" style="margin-top:6px;"></div>
@@ -228,7 +228,7 @@ function refreshKeyUi(){
   const isHardcoded = key && key === HARDCODED_API_KEY;
   if(isHardcoded){
     details.className = 'settings-bar set';
-    details.querySelector('summary').textContent = '⚙ Gemini API Key (built in ✓)';
+    details.querySelector('summary').textContent = '⚙ Google Vision API Key (built in ✓)';
     details.open = false;
     status.textContent = 'Using the key built into this app — nothing to set up on this device.';
     return;
@@ -236,12 +236,12 @@ function refreshKeyUi(){
   if(key){
     $('apiKeyInput').value = key;
     details.className = 'settings-bar set';
-    details.querySelector('summary').textContent = '⚙ Gemini API Key (saved ✓)';
+    details.querySelector('summary').textContent = '⚙ Google Vision API Key (saved ✓)';
     status.textContent = '';
   } else {
     details.className = 'settings-bar';
     details.open = true;
-    details.querySelector('summary').textContent = '⚙ Gemini API Key (needed for scanning)';
+    details.querySelector('summary').textContent = '⚙ Google Vision API Key (needed for scanning)';
     status.innerHTML = '<span style="color:var(--red);">No key saved yet — scanning won\'t work until you add one.</span>';
   }
 }
@@ -662,18 +662,20 @@ function handleUploadedFile(file){
   reader.readAsDataURL(file);
 }
 
-// Uses Gemini (a multimodal AI model) instead of a plain glyph-by-glyph OCR
-// engine. Gemini reads the whole card with context, so it does noticeably
-// better on rare/complex Chinese characters than character-by-character OCR —
-// and it can hand back the name directly instead of us guessing which text
-// line is the name vs. the company/title from a wall of raw OCR text.
-// Company is intentionally NOT extracted here anymore: it's only ever filled
-// in from a matching conference registration (see applyRegistrationMatch),
-// or typed in manually.
+// Uses Google Cloud Vision's TEXT_DETECTION to OCR the whole card, then
+// guessName() below picks out the line that's most likely to be the
+// individual PERSON's name (as opposed to the company/organization name,
+// job title, address, phone number, etc.) from the raw text Vision returns.
+// Company is intentionally NOT extracted here: it's only ever filled in from
+// a matching conference registration (see applyRegistrationMatch), or typed
+// in manually.
+// Note: plain OCR reads character-by-character with no context, so it can
+// occasionally drop or misread rare/complex Chinese characters — if that
+// happens often, re-type the name manually when confirming.
 async function runOcr(dataUrl){
   const apiKey = getApiKey();
   if(!apiKey){
-    $('ocrStatus').innerHTML = '<span style="color:var(--red);">No Gemini API key set. Open the settings above to add one, or type the name manually below.</span>';
+    $('ocrStatus').innerHTML = '<span style="color:var(--red);">No Google Vision API key set. Open the settings above to add one, or type the name manually below.</span>';
     $('nameInput').value = '';
     $('companyInput').value = '';
     $('confirmCard').style.display = 'block';
@@ -683,49 +685,24 @@ async function runOcr(dataUrl){
   $('ocrStatus').textContent = 'Reading name card…';
   try{
     const base64 = dataUrl.split(',')[1];
-    const mimeMatch = /^data:([^;]+);base64,/.exec(dataUrl);
-    const mimeType = mimeMatch ? mimeMatch[1] : 'image/jpeg';
 
-    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+    const resp = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
-        contents: [{
-          parts: [
-            { text: 'This image shows a business/name card, possibly printed in Chinese, English, or both. Find the individual PERSON\'s name on the card — not the company/organization name and not a job title. Transcribe it exactly as printed, in its original script (keep Chinese characters as Chinese characters). If no personal name is clearly visible, return an empty string. Respond with only the JSON object matching the schema, nothing else.' },
-            { inline_data: { mime_type: mimeType, data: base64 } }
-          ]
-        }],
-        generationConfig: {
-          temperature: 0,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: 'OBJECT',
-            properties: { name: { type: 'STRING' } },
-            required: ['name']
-          },
-          // Gemini 2.5 Flash "thinks" before answering by default, which adds
-          // several extra seconds of latency that this simple extraction task
-          // doesn't need. Setting the thinking budget to 0 disables that step
-          // and makes scans noticeably faster, with no meaningful accuracy
-          // loss for reading a name off a card.
-          thinkingConfig: { thinkingBudget: 0 }
-        }
+        requests: [{
+          image: { content: base64 },
+          features: [{ type: 'TEXT_DETECTION' }],
+          imageContext: { languageHints: ['zh-Hant', 'zh', 'en'] }
+        }]
       })
     });
     const data = await resp.json();
-    if(data.error){ throw new Error(data.error.message || 'Gemini API error'); }
+    const result = data.responses && data.responses[0];
+    if(result && result.error){ throw new Error(result.error.message || 'Google Vision API error'); }
 
-    const rawText = (data.candidates && data.candidates[0] && data.candidates[0].content &&
-      data.candidates[0].content.parts && data.candidates[0].content.parts[0] &&
-      data.candidates[0].content.parts[0].text) || '';
-
-    let name = '';
-    try{
-      name = (JSON.parse(rawText).name || '').trim();
-    }catch(e){
-      name = rawText.trim();
-    }
+    const rawText = (result && result.fullTextAnnotation && result.fullTextAnnotation.text) || '';
+    const name = guessName(rawText);
 
     $('rawText').textContent = rawText || '(no response)';
     $('rawTextWrap').style.display = rawText ? 'block' : 'none';
@@ -743,6 +720,40 @@ async function runOcr(dataUrl){
     $('confirmCard').style.display = 'block';
     applyRegistrationMatch(null);
   }
+}
+
+// Business cards mix a person's name in with the company name, job title,
+// address and contact details, and Vision's OCR has no idea which line is
+// which — it just returns a wall of text. This heuristic filters out lines
+// that look like a company, a job title, or contact info, then prefers a
+// short Chinese-name-shaped line (2-4 Chinese characters) over an
+// English/Latin-script one, since most cards for this event are Chinese.
+const COMPANY_HINTS = /(pte\.?\s*ltd|pty\.?\s*ltd|\bltd\.?\b|\bllc\b|\bllp\b|\binc\.?\b|\bcorp\.?\b|company|\bco\.?\b|group|holdings|enterprise|centre|center|clinic|hospital|pharmacy|association|society|institute|foundation|有限公司|股份公司|公司|集团|药行|药业|药局|诊所|医院|中心|协会|学会|基金会)/i;
+const TITLE_HINTS = /(manager|director|president|chairman|founder|\bceo\b|\bcfo\b|\bcoo\b|executive|consultant|specialist|physician|doctor|\bdr\.?\b|\bprof\.?\b|professor|经理|总监|董事|总裁|主任|医师|医生|教授|顾问|负责人|marketing|officer)/i;
+const CONTACT_HINTS = /(@|https?:\/\/|www\.|电话|手机|传真|邮箱|email|tel:|fax:|address|地址)/i;
+
+function guessName(rawText){
+  if(!rawText) return '';
+  const lines = rawText.split('\n').map(l => l.trim()).filter(Boolean);
+  const candidates = [];
+  for(const line of lines){
+    if(COMPANY_HINTS.test(line)) continue;
+    if(TITLE_HINTS.test(line)) continue;
+    if(CONTACT_HINTS.test(line)) continue;
+    if(/\d/.test(line)) continue;
+    candidates.push(line);
+  }
+  // A short line made up purely of Chinese characters (2-4 is typical for a
+  // Chinese personal name) is the strongest signal.
+  const chineseName = candidates.find(l => /^[一-鿿·]{2,4}$/.test(l));
+  if(chineseName) return chineseName;
+  // Otherwise, fall back to a short line of letters shaped like a Western
+  // personal name (1-4 words, letters/punctuation only).
+  const englishName = candidates.find(l => /^[A-Za-z][A-Za-z.\-' ]{1,40}$/.test(l) && l.split(/\s+/).length <= 4);
+  if(englishName) return englishName;
+  // Last resort: the first surviving candidate line, or failing that, just
+  // the very first line on the card.
+  return candidates[0] || lines[0] || '';
 }
 
 function checkSimilar(name){
