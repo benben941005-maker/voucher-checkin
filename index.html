@@ -703,7 +703,13 @@ async function runOcr(dataUrl){
             type: 'OBJECT',
             properties: { name: { type: 'STRING' } },
             required: ['name']
-          }
+          },
+          // Gemini 2.5 Flash "thinks" before answering by default, which adds
+          // several extra seconds of latency that this simple extraction task
+          // doesn't need. Setting the thinking budget to 0 disables that step
+          // and makes scans noticeably faster, with no meaningful accuracy
+          // loss for reading a name off a card.
+          thinkingConfig: { thinkingBudget: 0 }
         }
       })
     });
