@@ -32,6 +32,7 @@
   .btn-row{display:flex;gap:10px;}
   .btn-row button{flex:1;}
   input[type=text],input[type=datetime-local]{width:100%;font-size:15px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin-top:4px;}
+  input[type=text].no-match{border-color:var(--red);background:var(--red-bg);color:var(--red);}
   textarea{width:100%;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:8px 10px;border:1px solid var(--border);border-radius:8px;margin-top:4px;resize:vertical;}
   label{font-size:13px;color:var(--muted);font-weight:600;}
   .field{margin-bottom:12px;}
@@ -415,14 +416,19 @@ function findRegistrationMatch(name){
 
 function applyRegistrationMatch(match){
   const note = $('registrationMatchNote');
+  const companyInput = $('companyInput');
   if(!match){
-    note.style.display = 'none';
-    note.innerHTML = '';
+    note.className = '';
+    note.style.display = 'block';
+    note.style.color = 'var(--red)';
+    note.style.background = 'var(--red-bg)';
+    note.innerHTML = '✗ No matching conference registration found — please check/type Organization manually.';
+    companyInput.classList.add('no-match');
     return;
   }
+  companyInput.classList.remove('no-match');
   // Only fill in the field if the user hasn't already typed something into it —
   // never silently overwrite a manual correction.
-  const companyInput = $('companyInput');
   if(!companyInput.value.trim() && match.organization) companyInput.value = match.organization;
 
   const parts = [];
@@ -430,6 +436,8 @@ function applyRegistrationMatch(match){
   if(match.organization) parts.push(match.organization);
   if(match.mobile) parts.push(match.mobile);
   note.style.display = 'block';
+  note.style.color = 'var(--green)';
+  note.style.background = 'var(--green-bg)';
   note.innerHTML = '✓ Matched conference registration' + (parts.length ? ' — ' + escapeHtml(parts.join(' · ')) : '');
 }
 
