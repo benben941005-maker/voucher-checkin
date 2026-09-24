@@ -50,7 +50,6 @@
   th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;}
   .count-pill{display:inline-block;background:#e8eaed;border-radius:999px;padding:2px 10px;font-size:12px;font-weight:600;margin-left:6px;}
   .empty{color:var(--muted);font-size:13px;text-align:center;padding:20px 0;}
-  .edited-badge{display:inline-block;background:var(--amber-bg);color:var(--amber);border-radius:6px;padding:2px 6px;font-size:11px;font-weight:700;white-space:nowrap;}
   .status-badge{display:inline-block;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700;white-space:nowrap;}
   .status-in{background:var(--amber-bg);color:var(--amber);}
   .status-out{background:var(--green-bg);color:var(--green);}
@@ -142,6 +141,7 @@
       <label for="companyInput">Company (optional, check-in only)</label>
       <input type="text" id="companyInput" placeholder="Company name">
     </div>
+    <div id="registrationMatchNote" style="display:none;font-size:12px;color:var(--green);background:var(--green-bg);padding:8px 10px;border-radius:8px;margin-bottom:12px;"></div>
     <div id="similarWarning"></div>
     <div class="field">
       <label for="sigCanvas">Signature (required)</label>
@@ -169,26 +169,6 @@
   </div>
 
 </main>
-
-<div class="modal-overlay" id="editOverlay">
-  <div class="modal-box">
-    <h3 id="editModalName">Edit record</h3>
-    <div class="modal-note">⚠ Changing a time here marks this record as <strong>manipulated</strong>. The original time is kept and both the on-screen list and the Excel export will show it was edited.</div>
-    <div class="field">
-      <label for="editCheckIn">Check-In Time</label>
-      <input type="datetime-local" id="editCheckIn">
-    </div>
-    <div class="field">
-      <label for="editCheckOut">Check-Out Time</label>
-      <input type="datetime-local" id="editCheckOut">
-    </div>
-    <div id="editStatus" style="font-size:12px;margin-bottom:10px;"></div>
-    <div class="btn-row">
-      <button class="btn-secondary" id="editCancelBtn">Cancel</button>
-      <button class="btn-primary" id="editSaveBtn">Save changes</button>
-    </div>
-  </div>
-</div>
 
 <div class="modal-overlay" id="sigViewOverlay">
   <div class="modal-box" style="max-width:360px;">
@@ -377,6 +357,7 @@ function initFirebase(){
     }
     db = firebase.firestore();
     listenForUpdates();
+    listenForRegistrations();
   }catch(err){
     db = null;
     const msg = '🔴 Firebase did NOT connect (' + err.message + '). Duplicate checks are local-only on this device right now.';
@@ -402,6 +383,59 @@ function listenForUpdates(){
       $('syncStatus').innerHTML = '<span style="color:var(--red);">🔴 Sync error: ' + escapeHtml(err.message) + ' — duplicate checks may miss other devices until this clears.</span>';
     });
 }
+
+// --- Registration lookup: if this event also has a separate conference
+// registration form (see the "registrations_iccm2026" collection written by
+// that other app), match the scanned/typed Chinese name against it and
+// auto-fill Title/Company from the pre-submitted registration — so the
+// person at the check-in counter doesn't have to retype what was already
+// collected online. Change REGISTRATION_COLLECTION below if you reuse this
+// against a different registration form/collection name.
+const REGISTRATION_COLLECTION = 'registrations_iccm2026';
+let registrations = [];
+let unsubscribeRegistrations = null;
+
+function listenForRegistrations(){
+  if(!db) return;
+  if(unsubscribeRegistrations) unsubscribeRegistrations();
+  unsubscribeRegistrations = db.collection(REGISTRATION_COLLECTION).onSnapshot(snap => {
+    const list = [];
+    snap.forEach(doc => list.push(Object.assign({ id: doc.id }, doc.data())));
+    registrations = list;
+  }, err => {
+    // Not fatal — registration auto-fill is a convenience, not required for check-in.
+    console.warn('Could not load registrations for auto-fill:', err.message);
+  });
+}
+
+function findRegistrationMatch(name){
+  const norm = normalize(name);
+  if(!norm) return null;
+  return registrations.find(r => r.chineseName && normalize(r.chineseName) === norm) || null;
+}
+
+function applyRegistrationMatch(match){
+  const note = $('registrationMatchNote');
+  if(!match){
+    note.style.display = 'none';
+    note.innerHTML = '';
+    return;
+  }
+  // Only fill in fields the user hasn't already typed something into —
+  // never silently overwrite a manual correction.
+  const titleInput = $('titleInput');
+  const companyInput = $('companyInput');
+  if(!titleInput.value.trim() && match.position) titleInput.value = match.position;
+  if(!companyInput.value.trim() && match.organization) companyInput.value = match.organization;
+
+  const parts = [];
+  if(match.englishName) parts.push(match.englishName);
+  if(match.organization) parts.push(match.organization);
+  if(match.mobile) parts.push(match.mobile);
+  note.style.display = 'block';
+  note.innerHTML = '✓ Matched conference registration' + (parts.length ? ' — ' + escapeHtml(parts.join(' · ')) : '');
+}
+
 initFirebase();
 
 function normalize(name){
@@ -427,7 +461,7 @@ function saveEntries(){
 
 function fmtTime(ms){
   if(!ms) return '—';
-  return new Date(ms).toLocaleString(undefined, { hour:'2-digit', minute:'2-digit', hour12:true, month:'short', day:'numeric' });
+  return new Date(ms).toLocaleString(undefined, { year:'numeric', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', hour12:true });
 }
 
 function renderTable(){
@@ -440,7 +474,6 @@ function renderTable(){
     const statusBadge = e.checkOutAtMs
       ? '<span class="status-badge status-out">Checked Out</span>'
       : '<span class="status-badge status-in">Checked In</span>';
-    const editedBadge = e.edited ? '<span class="edited-badge">⚠ EDITED</span>' : '';
     const sigIn = e.checkInSignature
       ? `<img class="sig-thumb" data-sig-label="Check-in signature — ${escapeHtml(e.name)}" src="${e.checkInSignature}">`
       : '<span class="muted-dash">—</span>';
@@ -455,14 +488,9 @@ function renderTable(){
       <td>${fmtTime(e.checkOutAtMs)}</td>
       <td>${statusBadge}</td>
       <td>${sigIn}${sigOut}</td>
-      <td>${editedBadge}</td>
-      <td><button class="btn-secondary btn-small" data-edit-id="${escapeHtml(e.id)}">✏ Edit</button></td>
     </tr>`;
   }).join('');
-  $('tableWrap').innerHTML = `<table><thead><tr><th>Name</th><th>Title</th><th>Company</th><th>Check-In</th><th>Check-Out</th><th>Status</th><th>Signatures</th><th>Audit</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
-  $('tableWrap').querySelectorAll('[data-edit-id]').forEach(btn => {
-    btn.addEventListener('click', () => openEditModal(btn.getAttribute('data-edit-id')));
-  });
+  $('tableWrap').innerHTML = `<table><thead><tr><th>Name</th><th>Title</th><th>Company</th><th>Check-In</th><th>Check-Out</th><th>Status</th><th>Signatures</th></tr></thead><tbody>${rows}</tbody></table>`;
   $('tableWrap').querySelectorAll('.sig-thumb').forEach(img => {
     img.addEventListener('click', () => openSigView(img.src, img.getAttribute('data-sig-label')));
   });
@@ -648,6 +676,7 @@ async function runOcr(dataUrl){
     $('nameInput').value = '';
     $('companyInput').value = '';
     $('confirmCard').style.display = 'block';
+    applyRegistrationMatch(null);
     return;
   }
   $('ocrStatus').textContent = 'Reading name card…';
@@ -660,7 +689,7 @@ async function runOcr(dataUrl){
         requests: [{
           image: { content: base64 },
           features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
-          imageContext: { languageHints: ['zh', 'en'] }
+          imageContext: { languageHints: ['zh-Hant', 'zh', 'en'] }
         }]
       })
     });
@@ -679,12 +708,14 @@ async function runOcr(dataUrl){
     $('companyInput').value = guess.company;
     $('confirmCard').style.display = 'block';
     checkSimilar(guess.name);
+    applyRegistrationMatch(findRegistrationMatch(guess.name));
   }catch(err){
     $('ocrStatus').innerHTML = '<span style="color:var(--red);">Scan failed: ' + escapeHtml(err.message) + '. Please type the name manually.</span>';
     $('nameInput').value = '';
     $('titleInput').value = '';
     $('companyInput').value = '';
     $('confirmCard').style.display = 'block';
+    applyRegistrationMatch(null);
   }
 }
 
@@ -749,7 +780,10 @@ function checkSimilar(name){
   }
 }
 
-$('nameInput').addEventListener('input', e => checkSimilar(e.target.value));
+$('nameInput').addEventListener('input', e => {
+  checkSimilar(e.target.value);
+  applyRegistrationMatch(findRegistrationMatch(e.target.value));
+});
 
 // --- Signature pad ---
 // A plain canvas + Pointer Events (covers mouse, touch and pen with one code
@@ -827,12 +861,13 @@ function resetCaptureUi(){
   $('cameraInput').value = '';
   $('fileInput').value = '';
   resetSignaturePad();
+  applyRegistrationMatch(null);
 }
 
 // Atomic check-and-create: uses the normalized name as a fixed Firestore document ID
 // inside a transaction, so two devices racing to register the same person resolve
 // against a single document instead of a whole-sheet lock — typically well under a second.
-async function checkInWithFirebase(name, title, company, signature){
+async function checkInWithFirebase(name, title, company, signature, registrationInfo){
   const norm = normalize(name);
   const docId = eventId + '__' + norm;
   const ref = db.collection('checkins').doc(docId);
@@ -848,10 +883,12 @@ async function checkInWithFirebase(name, title, company, signature){
       checkOutAtMs: null,
       checkInSignature: signature || null,
       checkOutSignature: null,
-      edited: false,
-      originalCheckInAtMs: null,
-      originalCheckOutAtMs: null,
-      editedAtMs: null
+      // Filled in only when the scanned/typed name matched an entry in the
+      // separate conference registration form — otherwise left blank.
+      country: (registrationInfo && registrationInfo.country) || '',
+      mobile: (registrationInfo && registrationInfo.mobile) || '',
+      email: (registrationInfo && registrationInfo.email) || '',
+      physicianNo: (registrationInfo && registrationInfo.physicianNo) || ''
     });
     return { duplicate: false, checkInAtMs: nowMs };
   });
@@ -900,10 +937,12 @@ $('checkinActionBtn').addEventListener('click', async () => {
   // as a direct result of a user gesture.
   getAudioCtx();
 
+  const registrationMatch = findRegistrationMatch(name);
+
   try{
     if(db){
       btn.textContent = 'Checking…';
-      const result = await checkInWithFirebase(name, title, company, signature);
+      const result = await checkInWithFirebase(name, title, company, signature, registrationMatch);
       if(result.duplicate){
         showBanner('dup', `⚠ DUPLICATE — ${name} already checked in today at ${fmtTime(result.existingCheckInAtMs)}. Do not issue a second voucher.`);
         playErrorTone();
@@ -925,8 +964,10 @@ $('checkinActionBtn').addEventListener('click', async () => {
           id: eventId + '__' + norm, name, title, company,
           checkInAtMs: nowMs, checkOutAtMs: null,
           checkInSignature: signature, checkOutSignature: null,
-          edited: false,
-          originalCheckInAtMs: null, originalCheckOutAtMs: null, editedAtMs: null
+          country: (registrationMatch && registrationMatch.country) || '',
+          mobile: (registrationMatch && registrationMatch.mobile) || '',
+          email: (registrationMatch && registrationMatch.email) || '',
+          physicianNo: (registrationMatch && registrationMatch.physicianNo) || ''
         });
         showBanner('ok', `✓ ${name} checked in at ${fmtTime(nowMs)}. Voucher can be issued.`);
         playSuccessTone();
@@ -1000,87 +1041,6 @@ $('checkoutActionBtn').addEventListener('click', async () => {
   }
 });
 
-// --- Backend/admin edit: manually correct a check-in or check-out time.
-// Any change here flags the record as "edited" and preserves the ORIGINAL
-// value (only on the first edit, so repeated edits never overwrite the true
-// original) so both the on-screen list and the Excel export can show that a
-// time was manipulated and what it looked like before.
-let editingId = null;
-function openEditModal(id){
-  const record = entries.find(e => e.id === id);
-  if(!record) return;
-  editingId = id;
-  $('editModalName').textContent = 'Edit record — ' + record.name;
-  $('editCheckIn').value = msToLocalInputValue(record.checkInAtMs);
-  $('editCheckOut').value = msToLocalInputValue(record.checkOutAtMs);
-  $('editStatus').textContent = '';
-  $('editOverlay').classList.add('open');
-}
-function closeEditModal(){
-  editingId = null;
-  $('editOverlay').classList.remove('open');
-}
-$('editCancelBtn').addEventListener('click', closeEditModal);
-
-function msToLocalInputValue(ms){
-  if(!ms) return '';
-  const d = new Date(ms);
-  const pad = n => String(n).padStart(2,'0');
-  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-function localInputValueToMs(val){
-  if(!val) return null;
-  const d = new Date(val);
-  const t = d.getTime();
-  return isNaN(t) ? null : t;
-}
-
-$('editSaveBtn').addEventListener('click', async () => {
-  if(!editingId) return;
-  const record = entries.find(e => e.id === editingId);
-  if(!record) return;
-
-  const newCheckIn = localInputValueToMs($('editCheckIn').value);
-  const newCheckOut = localInputValueToMs($('editCheckOut').value);
-  const checkInChanged = newCheckIn !== record.checkInAtMs;
-  const checkOutChanged = newCheckOut !== record.checkOutAtMs;
-
-  if(!checkInChanged && !checkOutChanged){
-    closeEditModal();
-    return;
-  }
-
-  const update = {
-    checkInAtMs: newCheckIn,
-    checkOutAtMs: newCheckOut,
-    edited: true,
-    editedAtMs: Date.now()
-  };
-  // Preserve the very first original values only — a second or third edit
-  // must never clobber the true original with an already-edited value.
-  if(checkInChanged && record.originalCheckInAtMs == null){
-    update.originalCheckInAtMs = record.checkInAtMs;
-  }
-  if(checkOutChanged && record.originalCheckOutAtMs == null){
-    update.originalCheckOutAtMs = record.checkOutAtMs;
-  }
-
-  $('editStatus').textContent = 'Saving…';
-  try{
-    if(db){
-      await db.collection('checkins').doc(editingId).update(update);
-      // Real-time listener will refresh the table; still close the modal now.
-    } else {
-      Object.assign(record, update);
-      saveEntries();
-      renderTable();
-    }
-    closeEditModal();
-  }catch(err){
-    $('editStatus').innerHTML = '<span style="color:var(--red);">Could not save: ' + escapeHtml(err.message) + '</span>';
-  }
-});
-
 // Exporting with ExcelJS (not the lighter SheetJS used elsewhere) specifically
 // because SheetJS's free/community build cannot embed images into a workbook —
 // only ExcelJS can place the actual signature PNGs into their own cells.
@@ -1099,13 +1059,13 @@ $('exportBtn').addEventListener('click', async () => {
   try{
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Check-Ins');
-    const headers = ['Name','Title','Company','Check-In Time','Check-Out Time','Status','Manipulated?','Original Check-In','Original Check-Out','Edited At','Check-In Signature','Check-Out Signature'];
+    const headers = ['Name','Title','Company','Country','Mobile No.','Email','Physician Reg. No.','Check-In Time','Check-Out Time','Status','Check-In Signature','Check-Out Signature'];
     sheet.addRow(headers);
     sheet.getRow(1).font = { bold: true };
     sheet.columns = [
-      { width: 20 }, { width: 16 }, { width: 20 }, { width: 20 }, { width: 20 },
-      { width: 14 }, { width: 18 }, { width: 20 }, { width: 20 }, { width: 20 },
-      { width: 20 }, { width: 20 }
+      { width: 20 }, { width: 16 }, { width: 20 }, { width: 14 }, { width: 16 },
+      { width: 22 }, { width: 18 }, { width: 20 }, { width: 20 },
+      { width: 14 }, { width: 20 }, { width: 20 }
     ];
 
     entries.forEach((e, i) => {
@@ -1114,13 +1074,13 @@ $('exportBtn').addEventListener('click', async () => {
         e.name,
         e.title || '',
         e.company || '',
+        e.country || '',
+        e.mobile || '',
+        e.email || '',
+        e.physicianNo || '',
         e.checkInAtMs ? new Date(e.checkInAtMs).toLocaleString() : '',
         e.checkOutAtMs ? new Date(e.checkOutAtMs).toLocaleString() : '',
         e.checkOutAtMs ? 'Checked Out' : 'Checked In',
-        e.edited ? 'YES - TIME MODIFIED' : 'No',
-        e.originalCheckInAtMs ? new Date(e.originalCheckInAtMs).toLocaleString() : '',
-        e.originalCheckOutAtMs ? new Date(e.originalCheckOutAtMs).toLocaleString() : '',
-        e.editedAtMs ? new Date(e.editedAtMs).toLocaleString() : '',
         '', ''
       ]);
       sheet.getRow(rowIndex).height = 50;
