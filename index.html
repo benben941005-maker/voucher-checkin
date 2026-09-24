@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Voucher Check-In</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<title>Voucher Check-In / Check-Out</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
 <style>
@@ -19,17 +19,19 @@
   header{background:#fff;border-bottom:1px solid var(--border);padding:14px 16px;position:sticky;top:0;z-index:10;}
   header h1{font-size:18px;margin:0;}
   header .sub{font-size:12px;color:var(--muted);margin-top:2px;}
-  main{max-width:640px;margin:0 auto;padding:16px;padding-bottom:80px;}
+  main{max-width:680px;margin:0 auto;padding:16px;padding-bottom:80px;}
   .card{background:#fff;border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:16px;}
   .card h2{font-size:14px;text-transform:uppercase;letter-spacing:.03em;color:var(--muted);margin:0 0 12px;}
   button{font-size:15px;font-weight:600;border-radius:8px;border:none;padding:12px 16px;cursor:pointer;}
   .btn-primary{background:var(--blue);color:#fff;width:100%;}
   .btn-primary:disabled{background:#9aa0a6;cursor:not-allowed;}
   .btn-secondary{background:#fff;color:var(--blue);border:1px solid var(--blue);width:100%;}
+  .btn-secondary:disabled{color:#9aa0a6;border-color:#dadce0;cursor:not-allowed;}
   .btn-danger{background:#fff;color:var(--red);border:1px solid var(--red);}
+  .btn-small{padding:6px 10px;font-size:12px;width:auto;}
   .btn-row{display:flex;gap:10px;}
   .btn-row button{flex:1;}
-  input[type=text]{width:100%;font-size:15px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin-top:4px;}
+  input[type=text],input[type=datetime-local]{width:100%;font-size:15px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin-top:4px;}
   textarea{width:100%;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:8px 10px;border:1px solid var(--border);border-radius:8px;margin-top:4px;resize:vertical;}
   label{font-size:13px;color:var(--muted);font-weight:600;}
   .field{margin-bottom:12px;}
@@ -43,12 +45,15 @@
   .banner.ok{background:var(--green-bg);color:var(--green);display:block;}
   .banner.dup{background:var(--red-bg);color:var(--red);display:block;}
   .banner.warn{background:var(--amber-bg);color:var(--amber);display:block;font-weight:500;font-size:13px;}
-  table{width:100%;border-collapse:collapse;font-size:13px;}
-  th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--border);}
+  table{width:100%;border-collapse:collapse;font-size:12px;}
+  th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--border);vertical-align:middle;}
   th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;}
-  tr.dup-row td{color:var(--red);}
   .count-pill{display:inline-block;background:#e8eaed;border-radius:999px;padding:2px 10px;font-size:12px;font-weight:600;margin-left:6px;}
   .empty{color:var(--muted);font-size:13px;text-align:center;padding:20px 0;}
+  .edited-badge{display:inline-block;background:var(--amber-bg);color:var(--amber);border-radius:6px;padding:2px 6px;font-size:11px;font-weight:700;white-space:nowrap;}
+  .status-badge{display:inline-block;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700;white-space:nowrap;}
+  .status-in{background:var(--amber-bg);color:var(--amber);}
+  .status-out{background:var(--green-bg);color:var(--green);}
   .raw-text{white-space:pre-wrap;font-size:12px;background:#f1f3f4;border-radius:6px;padding:8px;max-height:120px;overflow:auto;color:var(--muted);margin-top:8px;}
   details summary{font-size:12px;color:var(--blue);cursor:pointer;margin-top:6px;}
   .settings-bar{font-size:12px;color:var(--muted);}
@@ -57,12 +62,20 @@
   .key-row{display:flex;gap:8px;margin-top:8px;}
   .key-row input{flex:1;}
   .key-row button{white-space:nowrap;padding:10px 14px;}
+  .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);display:none;align-items:flex-start;justify-content:center;padding:20px 16px;overflow-y:auto;z-index:100;}
+  .modal-overlay.open{display:flex;}
+  .modal-box{background:#fff;border-radius:12px;padding:20px;max-width:420px;width:100%;margin-top:40px;}
+  .modal-box h3{margin:0 0 4px;font-size:16px;}
+  .modal-note{font-size:12px;color:var(--amber);background:var(--amber-bg);padding:10px;border-radius:8px;margin:12px 0;}
+  #sigCanvas{width:100%;height:140px;border:1px solid var(--border);border-radius:8px;background:#fff;touch-action:none;display:block;margin-top:4px;}
+  .sig-thumb{height:22px;max-width:60px;border:1px solid var(--border);border-radius:3px;cursor:pointer;background:#fff;margin-right:4px;vertical-align:middle;}
+  .muted-dash{color:var(--muted);}
 </style>
 </head>
 <body>
 
 <header>
-  <h1>Voucher Check-In</h1>
+  <h1>Voucher Check-In / Check-Out</h1>
   <div class="sub" id="eventDateLabel"></div>
 </header>
 
@@ -122,21 +135,33 @@
       <input type="text" id="nameInput" placeholder="Edit if OCR got it wrong">
     </div>
     <div class="field">
-      <label for="titleInput">Title / Position (optional)</label>
+      <label for="titleInput">Title / Position (optional, check-in only)</label>
       <input type="text" id="titleInput" placeholder="e.g. 董事经理">
     </div>
     <div class="field">
-      <label for="companyInput">Company (optional)</label>
+      <label for="companyInput">Company (optional, check-in only)</label>
       <input type="text" id="companyInput" placeholder="Company name">
     </div>
     <div id="similarWarning"></div>
-    <button class="btn-primary" id="registerBtn">Check &amp; Register</button>
+    <div class="field">
+      <label for="sigCanvas">Signature (required)</label>
+      <canvas id="sigCanvas" width="600" height="180"></canvas>
+      <div class="btn-row" style="margin-top:8px;">
+        <button type="button" class="btn-secondary btn-small" id="clearSigBtn" style="width:auto;">✕ Clear Signature</button>
+      </div>
+    </div>
+    <div class="btn-row">
+      <button class="btn-primary" id="checkinActionBtn">✓ Check In</button>
+      <button class="btn-secondary" id="checkoutActionBtn">↩ Check Out</button>
+    </div>
   </div>
 
   <div class="card">
-    <h2>Today's Check-Ins <span class="count-pill" id="countPill">0</span></h2>
+    <h2>Today's Records <span class="count-pill" id="countPill">0</span></h2>
     <div id="syncStatus" style="font-size:12px;color:var(--muted);margin-bottom:8px;"></div>
-    <div id="tableWrap"><div class="empty">No check-ins yet.</div></div>
+    <div style="overflow-x:auto;">
+      <div id="tableWrap"><div class="empty">No check-ins yet.</div></div>
+    </div>
     <div class="btn-row" style="margin-top:14px;">
       <button class="btn-secondary" id="exportBtn">⬇ Export to Excel</button>
       <button class="btn-danger" id="clearBtn">🗑 New Event / Clear</button>
@@ -145,8 +170,38 @@
 
 </main>
 
+<div class="modal-overlay" id="editOverlay">
+  <div class="modal-box">
+    <h3 id="editModalName">Edit record</h3>
+    <div class="modal-note">⚠ Changing a time here marks this record as <strong>manipulated</strong>. The original time is kept and both the on-screen list and the Excel export will show it was edited.</div>
+    <div class="field">
+      <label for="editCheckIn">Check-In Time</label>
+      <input type="datetime-local" id="editCheckIn">
+    </div>
+    <div class="field">
+      <label for="editCheckOut">Check-Out Time</label>
+      <input type="datetime-local" id="editCheckOut">
+    </div>
+    <div id="editStatus" style="font-size:12px;margin-bottom:10px;"></div>
+    <div class="btn-row">
+      <button class="btn-secondary" id="editCancelBtn">Cancel</button>
+      <button class="btn-primary" id="editSaveBtn">Save changes</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="sigViewOverlay">
+  <div class="modal-box" style="max-width:360px;">
+    <h3 id="sigViewTitle">Signature</h3>
+    <img id="sigViewImg" style="width:100%;border:1px solid var(--border);border-radius:8px;background:#fff;">
+    <div class="btn-row" style="margin-top:14px;">
+      <button class="btn-primary" id="sigViewCloseBtn">Close</button>
+    </div>
+  </div>
+</div>
+
 <script>
-const STORAGE_KEY = 'voucherCheckinData_v1';
+const STORAGE_KEY = 'voucherCheckinData_v2';
 let entries = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
 let currentImageDataUrl = null;
 
@@ -224,23 +279,18 @@ $('saveKeyBtn').addEventListener('click', () => {
 refreshKeyUi();
 
 // --- Firebase sync (shared, low-latency duplicate list across devices) ---
-// Google Sheets/Apps Script was replaced here because it can't do fast, safe
-// concurrent writes from two devices at once (every check-in had to wait in a
-// script-level lock queue). Firestore does an atomic "check-and-create" per
-// name via a transaction, so two devices scanning at the same moment resolve
-// in a fraction of a second instead of several seconds.
-//
 // This placeholder is swapped for your real config by the GitHub Actions deploy
 // workflow (.github/workflows/deploy-pages.yml), which reads it from the repo
 // secret FIREBASE_CONFIG_JSON — so the real config never appears in this source
 // file or in git history. If you're opening this file directly (not via the
 // deployed GitHub Pages build), the placeholder stays as-is and JSON.parse
 // below fails harmlessly, falling back to each device pasting its own config.
+//
+// IMPORTANT: this placeholder text must appear EXACTLY ONCE in this file — a
+// second copy (e.g. in a sentinel check) would get overwritten by the same
+// find-and-replace and end up comparing the real config against itself.
 const HARDCODED_FIREBASE_CONFIG_RAW = '__FIREBASE_CONFIG_PLACEHOLDER__';
 const HARDCODED_FIREBASE_CONFIG = (function(){
-  // No separate "is this still the placeholder?" check on purpose: the literal
-  // placeholder text isn't valid JSON, so JSON.parse fails harmlessly and falls
-  // through to null on its own when the build-time substitution hasn't run.
   try{ return JSON.parse(HARDCODED_FIREBASE_CONFIG_RAW); }catch(e){ return null; }
 })();
 
@@ -329,8 +379,6 @@ function initFirebase(){
     listenForUpdates();
   }catch(err){
     db = null;
-    // Surfaced in the main sync status too (not just the collapsed settings panel)
-    // so a failed connection is impossible to miss on the check-in screen itself.
     const msg = '🔴 Firebase did NOT connect (' + err.message + '). Duplicate checks are local-only on this device right now.';
     $('syncStatus').innerHTML = '<span style="color:var(--red);">' + msg + '</span>';
     $('firebaseStatus').innerHTML = '<span style="color:var(--red);">' + escapeHtml(err.message) + '</span>';
@@ -344,8 +392,8 @@ function listenForUpdates(){
     .where('eventId', '==', eventId)
     .onSnapshot(snap => {
       const list = [];
-      snap.forEach(doc => list.push(doc.data()));
-      list.sort((a,b) => (a.createdAtMs||0) - (b.createdAtMs||0));
+      snap.forEach(doc => list.push(Object.assign({ id: doc.id }, doc.data())));
+      list.sort((a,b) => (a.checkInAtMs||0) - (b.checkInAtMs||0));
       entries = list;
       saveEntries();
       renderTable();
@@ -377,39 +425,59 @@ function saveEntries(){
   localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
 }
 
+function fmtTime(ms){
+  if(!ms) return '—';
+  return new Date(ms).toLocaleString(undefined, { hour:'2-digit', minute:'2-digit', hour12:true, month:'short', day:'numeric' });
+}
+
 function renderTable(){
   $('countPill').textContent = entries.length;
   if(entries.length === 0){
     $('tableWrap').innerHTML = '<div class="empty">No check-ins yet.</div>';
     return;
   }
-  let rows = entries.slice().reverse().map(e => `
-    <tr class="${e.status==='DUPLICATE' ? 'dup-row' : ''}">
-      <td>${e.time}</td>
+  const rows = entries.slice().reverse().map(e => {
+    const statusBadge = e.checkOutAtMs
+      ? '<span class="status-badge status-out">Checked Out</span>'
+      : '<span class="status-badge status-in">Checked In</span>';
+    const editedBadge = e.edited ? '<span class="edited-badge">⚠ EDITED</span>' : '';
+    const sigIn = e.checkInSignature
+      ? `<img class="sig-thumb" data-sig-label="Check-in signature — ${escapeHtml(e.name)}" src="${e.checkInSignature}">`
+      : '<span class="muted-dash">—</span>';
+    const sigOut = e.checkOutSignature
+      ? `<img class="sig-thumb" data-sig-label="Check-out signature — ${escapeHtml(e.name)}" src="${e.checkOutSignature}">`
+      : '<span class="muted-dash">—</span>';
+    return `<tr>
       <td>${escapeHtml(e.name)}</td>
       <td>${escapeHtml(e.title||'')}</td>
       <td>${escapeHtml(e.company||'')}</td>
-      <td>${e.status==='DUPLICATE' ? '⚠ Duplicate' : '✓ OK'}</td>
-    </tr>`).join('');
-  $('tableWrap').innerHTML = `<table><thead><tr><th>Time</th><th>Name</th><th>Title</th><th>Company</th><th>Status</th></tr></thead><tbody>${rows}</tbody></table>`;
+      <td>${fmtTime(e.checkInAtMs)}</td>
+      <td>${fmtTime(e.checkOutAtMs)}</td>
+      <td>${statusBadge}</td>
+      <td>${sigIn}${sigOut}</td>
+      <td>${editedBadge}</td>
+      <td><button class="btn-secondary btn-small" data-edit-id="${escapeHtml(e.id)}">✏ Edit</button></td>
+    </tr>`;
+  }).join('');
+  $('tableWrap').innerHTML = `<table><thead><tr><th>Name</th><th>Title</th><th>Company</th><th>Check-In</th><th>Check-Out</th><th>Status</th><th>Signatures</th><th>Audit</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+  $('tableWrap').querySelectorAll('[data-edit-id]').forEach(btn => {
+    btn.addEventListener('click', () => openEditModal(btn.getAttribute('data-edit-id')));
+  });
+  $('tableWrap').querySelectorAll('.sig-thumb').forEach(img => {
+    img.addEventListener('click', () => openSigView(img.src, img.getAttribute('data-sig-label')));
+  });
 }
 
 function escapeHtml(s){
-  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
-// Two distinct tones, both generated with the Web Audio API (no audio files, works offline):
-//  - a single pleasant high chime for a successful (non-duplicate) registration
-//  - a two-beep low buzzer for a duplicate / error condition
-//
-// Both share ONE AudioContext instead of creating a new one per call. Safari
-// (especially iOS Safari, which is what most phones scanning at a check-in
-// desk will use) caps how many AudioContexts can exist at once — after
-// several successful scans each spun up their own never-closed context, the
-// browser silently refused to create any more, which is why the success tone
-// kept working (its contexts were created early) while the error tone went
-// silent later in a session (its context creation failed and was swallowed
-// by the catch block). Reusing one context avoids hitting that ceiling.
+// Two distinct tones, both generated with the Web Audio API (no audio files,
+// works offline) — a success chime for a clean check-in/out, and a two-beep
+// buzzer for a duplicate/error condition. They share ONE AudioContext instead
+// of a fresh one per call: Safari (especially iOS) caps how many contexts can
+// exist at once, so a fresh one per tap eventually goes silent after several
+// scans in the same session.
 let sharedAudioCtx = null;
 function getAudioCtx(){
   try{
@@ -683,56 +751,164 @@ function checkSimilar(name){
 
 $('nameInput').addEventListener('input', e => checkSimilar(e.target.value));
 
+// --- Signature pad ---
+// A plain canvas + Pointer Events (covers mouse, touch and pen with one code
+// path). touch-action:none on the canvas (see CSS) stops the page from
+// scrolling while someone signs on a phone. The canvas's internal pixel size
+// (600x180) is fixed and kept modest on purpose: signatures are saved as a
+// PNG data URL straight into the Firestore document, and Firestore caps a
+// single document at 1 MiB — this size keeps a signature to a few tens of KB.
+const sigCanvas = $('sigCanvas');
+const sigCtx = sigCanvas.getContext('2d');
+let sigDrawing = false;
+let sigHasStroke = false;
+let sigLastPoint = null;
+
+function resetSignaturePad(){
+  sigCtx.clearRect(0, 0, sigCanvas.width, sigCanvas.height);
+  sigCtx.fillStyle = '#fff';
+  sigCtx.fillRect(0, 0, sigCanvas.width, sigCanvas.height);
+  sigHasStroke = false;
+}
+
+function sigPointerPos(e){
+  const rect = sigCanvas.getBoundingClientRect();
+  const scaleX = sigCanvas.width / rect.width;
+  const scaleY = sigCanvas.height / rect.height;
+  return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY };
+}
+
+sigCanvas.addEventListener('pointerdown', e => {
+  sigDrawing = true;
+  sigHasStroke = true;
+  sigLastPoint = sigPointerPos(e);
+  sigCanvas.setPointerCapture(e.pointerId);
+  e.preventDefault();
+});
+sigCanvas.addEventListener('pointermove', e => {
+  if(!sigDrawing) return;
+  const p = sigPointerPos(e);
+  sigCtx.strokeStyle = '#1a1a1a';
+  sigCtx.lineWidth = 2.5;
+  sigCtx.lineCap = 'round';
+  sigCtx.lineJoin = 'round';
+  sigCtx.beginPath();
+  sigCtx.moveTo(sigLastPoint.x, sigLastPoint.y);
+  sigCtx.lineTo(p.x, p.y);
+  sigCtx.stroke();
+  sigLastPoint = p;
+  e.preventDefault();
+});
+function endSigStroke(){ sigDrawing = false; }
+sigCanvas.addEventListener('pointerup', endSigStroke);
+sigCanvas.addEventListener('pointerleave', endSigStroke);
+sigCanvas.addEventListener('pointercancel', endSigStroke);
+
+$('clearSigBtn').addEventListener('click', resetSignaturePad);
+resetSignaturePad();
+
+function getSignatureDataUrl(){
+  if(!sigHasStroke) return null;
+  return sigCanvas.toDataURL('image/png');
+}
+
+function openSigView(src, label){
+  $('sigViewTitle').textContent = label || 'Signature';
+  $('sigViewImg').src = src;
+  $('sigViewOverlay').classList.add('open');
+}
+$('sigViewCloseBtn').addEventListener('click', () => $('sigViewOverlay').classList.remove('open'));
+
+function resetCaptureUi(){
+  $('confirmCard').style.display = 'none';
+  $('preview').style.display = 'none';
+  $('ocrStatus').textContent = '';
+  $('rawTextWrap').style.display = 'none';
+  $('cameraInput').value = '';
+  $('fileInput').value = '';
+  resetSignaturePad();
+}
+
 // Atomic check-and-create: uses the normalized name as a fixed Firestore document ID
 // inside a transaction, so two devices racing to register the same person resolve
 // against a single document instead of a whole-sheet lock — typically well under a second.
-async function registerWithFirebase(name, title, company){
+async function checkInWithFirebase(name, title, company, signature){
   const norm = normalize(name);
   const docId = eventId + '__' + norm;
   const ref = db.collection('checkins').doc(docId);
-  const time = new Date().toLocaleTimeString();
   const nowMs = Date.now();
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     if(snap.exists){
-      const data = snap.data();
-      return { duplicate: true, existingTime: data.time };
+      return { duplicate: true, existingCheckInAtMs: snap.data().checkInAtMs };
     }
-    tx.set(ref, { name, title, company, time, eventId, norm, createdAtMs: nowMs, status: 'OK' });
-    return { duplicate: false, time };
+    tx.set(ref, {
+      name, title, company, eventId, norm,
+      checkInAtMs: nowMs,
+      checkOutAtMs: null,
+      checkInSignature: signature || null,
+      checkOutSignature: null,
+      edited: false,
+      originalCheckInAtMs: null,
+      originalCheckOutAtMs: null,
+      editedAtMs: null
+    });
+    return { duplicate: false, checkInAtMs: nowMs };
   });
 }
 
-$('registerBtn').addEventListener('click', async () => {
+// Same atomic pattern for checking out — locates the existing check-in record
+// by the same name-derived document ID and refuses a second check-out.
+async function checkOutWithFirebase(name, signature){
+  const norm = normalize(name);
+  const docId = eventId + '__' + norm;
+  const ref = db.collection('checkins').doc(docId);
+  const nowMs = Date.now();
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if(!snap.exists){
+      return { error: `No check-in record found for "${name}" today — check in first.` };
+    }
+    const data = snap.data();
+    if(data.checkOutAtMs){
+      return { error: `${data.name} was already checked out at ${fmtTime(data.checkOutAtMs)}.` };
+    }
+    tx.update(ref, { checkOutAtMs: nowMs, checkOutSignature: signature || null });
+    return { name: data.name, checkOutAtMs: nowMs };
+  });
+}
+
+$('checkinActionBtn').addEventListener('click', async () => {
   const name = $('nameInput').value.trim();
   const title = $('titleInput').value.trim();
   const company = $('companyInput').value.trim();
   if(!name){
-    alert('Please enter a name before registering.');
+    alert('Please enter a name before checking in.');
+    return;
+  }
+  const signature = getSignatureDataUrl();
+  if(!signature){
+    alert('Please have the guest sign before checking in.');
     return;
   }
 
-  const btn = $('registerBtn');
+  const btn = $('checkinActionBtn');
   const originalLabel = btn.textContent;
   btn.disabled = true;
-
   // Unlock/create the shared AudioContext HERE, synchronously, in direct response
   // to the tap — before any "await" below. iOS Safari only allows audio to start
-  // as a direct result of a user gesture; once the transaction below is awaited,
-  // playing a tone afterwards no longer counts as gesture-triggered and Safari
-  // silently blocks it. Calling this now "unlocks" the context so the tones
-  // played later (after the network round-trip) are still audible.
+  // as a direct result of a user gesture.
   getAudioCtx();
 
   try{
     if(db){
       btn.textContent = 'Checking…';
-      const result = await registerWithFirebase(name, title, company);
+      const result = await checkInWithFirebase(name, title, company, signature);
       if(result.duplicate){
-        showBanner('dup', `⚠ DUPLICATE — ${name} already received a voucher today (first check-in at ${result.existingTime}). Do not issue a second voucher.`);
+        showBanner('dup', `⚠ DUPLICATE — ${name} already checked in today at ${fmtTime(result.existingCheckInAtMs)}. Do not issue a second voucher.`);
         playErrorTone();
       } else {
-        showBanner('ok', `✓ ${name} — first time today. Voucher can be issued.`);
+        showBanner('ok', `✓ ${name} checked in at ${fmtTime(result.checkInAtMs)}. Voucher can be issued.`);
         playSuccessTone();
       }
       // The real-time listener will also update the table shortly; no need to push locally here.
@@ -740,62 +916,244 @@ $('registerBtn').addEventListener('click', async () => {
       // No sync configured — single-device local-only check.
       const norm = normalize(name);
       const existing = entries.find(e => normalize(e.name) === norm);
-      const time = new Date().toLocaleTimeString();
+      const nowMs = Date.now();
       if(existing){
-        entries.push({name, title, company, time, status:'DUPLICATE'});
-        showBanner('dup', `⚠ DUPLICATE — ${name} already received a voucher today (first check-in at ${existing.time}). Do not issue a second voucher.`);
+        showBanner('dup', `⚠ DUPLICATE — ${name} already checked in today at ${fmtTime(existing.checkInAtMs)}. Do not issue a second voucher.`);
         playErrorTone();
       } else {
-        entries.push({name, title, company, time, status:'OK'});
-        showBanner('ok', `✓ ${name} — first time today. Voucher can be issued.`);
+        entries.push({
+          id: eventId + '__' + norm, name, title, company,
+          checkInAtMs: nowMs, checkOutAtMs: null,
+          checkInSignature: signature, checkOutSignature: null,
+          edited: false,
+          originalCheckInAtMs: null, originalCheckOutAtMs: null, editedAtMs: null
+        });
+        showBanner('ok', `✓ ${name} checked in at ${fmtTime(nowMs)}. Voucher can be issued.`);
         playSuccessTone();
+        saveEntries();
+        renderTable();
       }
-      saveEntries();
-      renderTable();
     }
   }catch(err){
-    // Sync failed (offline / bad config) — fall back to a local-only check so staff
-    // isn't blocked, but make it clear this might miss other devices' entries.
-    const norm = normalize(name);
-    const existing = entries.find(e => normalize(e.name) === norm);
-    const time = new Date().toLocaleTimeString();
-    if(existing){
-      entries.push({name, title, company, time, status:'DUPLICATE'});
-      showBanner('dup', `⚠ DUPLICATE (offline check only) — matches a local entry at ${existing.time}. Could not reach Firebase: ${err.message}`);
-      playErrorTone();
-    } else {
-      entries.push({name, title, company, time, status:'OK'});
-      showBanner('warn', `⚠ Saved on this device only — could not sync to other devices (${err.message}). Check network and try again later.`);
-      // Deliberately no sound here: we can't confirm this is truly a first-time
-      // check-in across all devices, so we don't want to falsely signal "OK".
-    }
-    saveEntries();
-    renderTable();
+    showBanner('warn', `⚠ Could not check in — could not reach Firebase: ${err.message}`);
   } finally {
     btn.disabled = false;
     btn.textContent = originalLabel;
-
-    // reset capture UI for next scan
-    $('confirmCard').style.display = 'none';
-    $('preview').style.display = 'none';
-    $('ocrStatus').textContent = '';
-    $('rawTextWrap').style.display = 'none';
-    $('cameraInput').value = '';
-    $('fileInput').value = '';
+    resetCaptureUi();
   }
 });
 
-$('exportBtn').addEventListener('click', () => {
+$('checkoutActionBtn').addEventListener('click', async () => {
+  const name = $('nameInput').value.trim();
+  if(!name){
+    alert('Please enter a name before checking out.');
+    return;
+  }
+  const signature = getSignatureDataUrl();
+  if(!signature){
+    alert('Please have the guest sign before checking out.');
+    return;
+  }
+
+  const btn = $('checkoutActionBtn');
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  // Same synchronous unlock as check-in, for the same iOS Safari reason.
+  getAudioCtx();
+
+  try{
+    if(db){
+      btn.textContent = 'Checking…';
+      const result = await checkOutWithFirebase(name, signature);
+      if(result.error){
+        showBanner('dup', '⚠ ' + result.error);
+        playErrorTone();
+      } else {
+        showBanner('ok', `✓ ${result.name} checked out at ${fmtTime(result.checkOutAtMs)}.`);
+        playSuccessTone();
+      }
+    } else {
+      const norm = normalize(name);
+      const existing = entries.find(e => normalize(e.name) === norm);
+      const nowMs = Date.now();
+      if(!existing){
+        showBanner('dup', `⚠ No check-in record found for "${name}" today — check in first.`);
+        playErrorTone();
+      } else if(existing.checkOutAtMs){
+        showBanner('dup', `⚠ ${existing.name} was already checked out at ${fmtTime(existing.checkOutAtMs)}.`);
+        playErrorTone();
+      } else {
+        existing.checkOutAtMs = nowMs;
+        existing.checkOutSignature = signature;
+        showBanner('ok', `✓ ${existing.name} checked out at ${fmtTime(nowMs)}.`);
+        playSuccessTone();
+        saveEntries();
+        renderTable();
+      }
+    }
+  }catch(err){
+    showBanner('warn', `⚠ Could not check out — could not reach Firebase: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+    resetCaptureUi();
+  }
+});
+
+// --- Backend/admin edit: manually correct a check-in or check-out time.
+// Any change here flags the record as "edited" and preserves the ORIGINAL
+// value (only on the first edit, so repeated edits never overwrite the true
+// original) so both the on-screen list and the Excel export can show that a
+// time was manipulated and what it looked like before.
+let editingId = null;
+function openEditModal(id){
+  const record = entries.find(e => e.id === id);
+  if(!record) return;
+  editingId = id;
+  $('editModalName').textContent = 'Edit record — ' + record.name;
+  $('editCheckIn').value = msToLocalInputValue(record.checkInAtMs);
+  $('editCheckOut').value = msToLocalInputValue(record.checkOutAtMs);
+  $('editStatus').textContent = '';
+  $('editOverlay').classList.add('open');
+}
+function closeEditModal(){
+  editingId = null;
+  $('editOverlay').classList.remove('open');
+}
+$('editCancelBtn').addEventListener('click', closeEditModal);
+
+function msToLocalInputValue(ms){
+  if(!ms) return '';
+  const d = new Date(ms);
+  const pad = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function localInputValueToMs(val){
+  if(!val) return null;
+  const d = new Date(val);
+  const t = d.getTime();
+  return isNaN(t) ? null : t;
+}
+
+$('editSaveBtn').addEventListener('click', async () => {
+  if(!editingId) return;
+  const record = entries.find(e => e.id === editingId);
+  if(!record) return;
+
+  const newCheckIn = localInputValueToMs($('editCheckIn').value);
+  const newCheckOut = localInputValueToMs($('editCheckOut').value);
+  const checkInChanged = newCheckIn !== record.checkInAtMs;
+  const checkOutChanged = newCheckOut !== record.checkOutAtMs;
+
+  if(!checkInChanged && !checkOutChanged){
+    closeEditModal();
+    return;
+  }
+
+  const update = {
+    checkInAtMs: newCheckIn,
+    checkOutAtMs: newCheckOut,
+    edited: true,
+    editedAtMs: Date.now()
+  };
+  // Preserve the very first original values only — a second or third edit
+  // must never clobber the true original with an already-edited value.
+  if(checkInChanged && record.originalCheckInAtMs == null){
+    update.originalCheckInAtMs = record.checkInAtMs;
+  }
+  if(checkOutChanged && record.originalCheckOutAtMs == null){
+    update.originalCheckOutAtMs = record.checkOutAtMs;
+  }
+
+  $('editStatus').textContent = 'Saving…';
+  try{
+    if(db){
+      await db.collection('checkins').doc(editingId).update(update);
+      // Real-time listener will refresh the table; still close the modal now.
+    } else {
+      Object.assign(record, update);
+      saveEntries();
+      renderTable();
+    }
+    closeEditModal();
+  }catch(err){
+    $('editStatus').innerHTML = '<span style="color:var(--red);">Could not save: ' + escapeHtml(err.message) + '</span>';
+  }
+});
+
+// Exporting with ExcelJS (not the lighter SheetJS used elsewhere) specifically
+// because SheetJS's free/community build cannot embed images into a workbook —
+// only ExcelJS can place the actual signature PNGs into their own cells.
+function dataUrlToBase64AndExt(dataUrl){
+  const match = /^data:image\/(png|jpeg);base64,(.*)$/.exec(dataUrl || '');
+  if(!match) return null;
+  return { base64: match[2], extension: match[1] === 'jpeg' ? 'jpeg' : 'png' };
+}
+
+$('exportBtn').addEventListener('click', async () => {
   if(entries.length === 0){ alert('No check-ins to export yet.'); return; }
-  const wsData = [
-    ['Time','Name','Title','Company','Status'],
-    ...entries.map(e => [e.time, e.name, e.title||'', e.company||'', e.status==='DUPLICATE' ? 'DUPLICATE' : 'OK'])
-  ];
-  const ws = XLSX.utils.aoa_to_sheet(wsData);
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Check-Ins');
-  const dateStr = new Date().toISOString().slice(0,10);
-  XLSX.writeFile(wb, `voucher_checkins_${dateStr}.xlsx`);
+  const btn = $('exportBtn');
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Preparing…';
+  try{
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Check-Ins');
+    const headers = ['Name','Title','Company','Check-In Time','Check-Out Time','Status','Manipulated?','Original Check-In','Original Check-Out','Edited At','Check-In Signature','Check-Out Signature'];
+    sheet.addRow(headers);
+    sheet.getRow(1).font = { bold: true };
+    sheet.columns = [
+      { width: 20 }, { width: 16 }, { width: 20 }, { width: 20 }, { width: 20 },
+      { width: 14 }, { width: 18 }, { width: 20 }, { width: 20 }, { width: 20 },
+      { width: 20 }, { width: 20 }
+    ];
+
+    entries.forEach((e, i) => {
+      const rowIndex = i + 2; // header occupies row 1
+      sheet.addRow([
+        e.name,
+        e.title || '',
+        e.company || '',
+        e.checkInAtMs ? new Date(e.checkInAtMs).toLocaleString() : '',
+        e.checkOutAtMs ? new Date(e.checkOutAtMs).toLocaleString() : '',
+        e.checkOutAtMs ? 'Checked Out' : 'Checked In',
+        e.edited ? 'YES - TIME MODIFIED' : 'No',
+        e.originalCheckInAtMs ? new Date(e.originalCheckInAtMs).toLocaleString() : '',
+        e.originalCheckOutAtMs ? new Date(e.originalCheckOutAtMs).toLocaleString() : '',
+        e.editedAtMs ? new Date(e.editedAtMs).toLocaleString() : '',
+        '', ''
+      ]);
+      sheet.getRow(rowIndex).height = 50;
+
+      const sigIn = dataUrlToBase64AndExt(e.checkInSignature);
+      if(sigIn){
+        const imgId = workbook.addImage({ base64: sigIn.base64, extension: sigIn.extension });
+        sheet.addImage(imgId, { tl: { col: 10.05, row: rowIndex - 1 + 0.05 }, ext: { width: 140, height: 45 } });
+      }
+      const sigOut = dataUrlToBase64AndExt(e.checkOutSignature);
+      if(sigOut){
+        const imgId = workbook.addImage({ base64: sigOut.base64, extension: sigOut.extension });
+        sheet.addImage(imgId, { tl: { col: 11.05, row: rowIndex - 1 + 0.05 }, ext: { width: 140, height: 45 } });
+      }
+    });
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const dateStr = new Date().toISOString().slice(0,10);
+    a.href = url;
+    a.download = `voucher_checkins_${dateStr}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }catch(err){
+    alert('Could not export: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+  }
 });
 
 $('clearBtn').addEventListener('click', async () => {
