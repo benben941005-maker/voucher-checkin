@@ -407,7 +407,10 @@ function listenForRegistrations(){
 function findRegistrationMatch(name){
   const norm = normalize(name);
   if(!norm) return null;
-  return registrations.find(r => r.chineseName && normalize(r.chineseName) === norm) || null;
+  return registrations.find(r =>
+    (r.chineseName && normalize(r.chineseName) === norm) ||
+    (r.englishName && normalize(r.englishName) === norm)
+  ) || null;
 }
 
 function applyRegistrationMatch(match){
