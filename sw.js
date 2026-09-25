@@ -2,17 +2,17 @@
 //
 // Purpose: let the app OPEN even with zero network, as long as it has been
 // opened at least once before while online (which installs this cache).
-// This does NOT make scanning (Google Vision OCR) or Firebase sync work
-// offline — those genuinely need a live connection — but it means the app
-// shell itself (the page + the JS libraries it depends on) is always
-// available, so staff can at least use manual name entry + signature +
-// check-in/out (which already has its own offline fallback built into the
-// app) even when there is truly no network at the venue.
+// Firebase sync still genuinely needs a live connection, but name-card
+// scanning now has a local (in-browser) fallback via Tesseract.js for when
+// Google Vision can't be reached — see the OCR_ASSET_HOSTS handling below —
+// so staff can keep scanning (with lower accuracy) instead of only being
+// able to fall back to manual name entry + signature + check-in/out (which
+// already has its own offline-sync fallback built into the app).
 //
 // Bump CACHE_NAME whenever you want to force everyone's cached copy to
 // refresh (e.g. after a meaningful update to index.html) — the old cache is
 // deleted automatically on the next activate.
-const CACHE_NAME = 'voucher-checkin-v1';
+const CACHE_NAME = 'voucher-checkin-v2';
 
 // The exact set of files this app needs to open and run. Kept in sync with
 // the <script src="..."> tags in index.html — if you add/remove a library
@@ -22,7 +22,23 @@ const APP_SHELL_URLS = [
   './index.html',
   'https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js',
   'https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js',
-  'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js'
+  'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js',
+  'https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js'
+];
+
+// Tesseract.js (the local/offline OCR fallback) downloads its worker script,
+// its WASM engine, and its Chinese/English language data files on first use,
+// from CDNs like these — the exact file names/versions are chosen internally
+// by the library, so rather than hard-coding them, any GET request to one of
+// these hosts gets cached the first time it succeeds (while online) and is
+// served from cache on every request after that (see the fetch handler
+// below). This is what lets local OCR keep working with zero network, as
+// long as it has run at least once before — index.html "primes" it
+// automatically the first time the app is opened online.
+const OCR_ASSET_HOSTS = [
+  'cdn.jsdelivr.net',
+  'tessdata.projectnaptha.com',
+  'unpkg.com'
 ];
 
 self.addEventListener('install', event => {
@@ -90,6 +106,28 @@ self.addEventListener('fetch', event => {
     );
     return;
   }
+
+  // Tesseract.js's own asset downloads (worker script, WASM engine, language
+  // data) — cache-first with the same "cache once, reuse forever" strategy
+  // as the app shell above, keyed by whichever exact URLs the library
+  // happens to request (see OCR_ASSET_HOSTS comment above).
+  try{
+    const url = new URL(req.url);
+    if(OCR_ASSET_HOSTS.includes(url.hostname)){
+      event.respondWith(
+        caches.match(req).then(cached => {
+          if(cached) return cached;
+          return fetch(req).then(resp => {
+            if(resp && (resp.ok || resp.type === 'opaque')){
+              caches.open(CACHE_NAME).then(cache => cache.put(req, resp.clone()));
+            }
+            return resp;
+          });
+        })
+      );
+      return;
+    }
+  }catch(e){ /* malformed/opaque request URL — fall through untouched */ }
 
   // Everything else — Firestore sync traffic, the Google Vision OCR calls,
   // the conference-registration lookup, anything else — passes straight
