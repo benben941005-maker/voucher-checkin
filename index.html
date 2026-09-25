@@ -158,14 +158,18 @@
   </div>
 
   <div class="card">
-    <h2>Today's Records <span class="count-pill" id="countPill">0</span></h2>
+    <h2>Records <span class="count-pill" id="countPill">0</span></h2>
+    <div class="field" style="margin-bottom:10px;">
+      <label for="dateFilterSelect">Viewing date</label>
+      <select id="dateFilterSelect" style="width:100%;font-size:15px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin-top:4px;"></select>
+    </div>
     <div id="syncStatus" style="font-size:12px;color:var(--muted);margin-bottom:8px;"></div>
     <div style="overflow-x:auto;">
       <div id="tableWrap"><div class="empty">No check-ins yet.</div></div>
     </div>
     <div class="btn-row" style="margin-top:14px;">
       <button class="btn-secondary" id="exportBtn">⬇ Export to Excel</button>
-      <button class="btn-danger" id="clearBtn">🗑 New Event / Clear</button>
+      <button class="btn-danger" id="clearBtn">🗑 Clear</button>
     </div>
   </div>
 
@@ -182,8 +186,14 @@
 </div>
 
 <script>
-const STORAGE_KEY = 'voucherCheckinData_v2';
-let entries = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+const STORAGE_KEY = 'voucherCheckinData_v3';
+// allEntries: every check-in record ever synced from Firebase, across every
+// day — nothing is ever filtered out at the sync/storage level, so no day's
+// data can look "wiped" just from opening the app later.
+// entries: the subset currently shown in the table / exported to Excel,
+// filtered down to whichever date is picked in the "Viewing date" dropdown.
+let allEntries = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+let entries = allEntries;
 let currentImageDataUrl = null;
 
 const $ = id => document.getElementById(id);
@@ -201,7 +211,32 @@ function todayEventId(){
   const day = String(d.getDate()).padStart(2,'0');
   return `${y}-${m}-${day}`;
 }
+// Used for every NEW check-in/check-out made from this device today. Kept
+// per-day (as it always was) because this is a multi-day conference — the
+// same person checking in on both the 17th and 18th is two separate, valid
+// check-ins, not a duplicate. Duplicate prevention only blocks a second
+// check-in on the SAME day.
 const eventId = todayEventId();
+
+// Groups a record by the calendar day it actually happened on (derived from
+// its own checkInAtMs timestamp, not the eventId field) — this stays correct
+// even for older records that may have been saved under a different eventId
+// scheme.
+function dateKeyFromMs(ms){
+  if(!ms) return 'unknown';
+  const d = new Date(ms);
+  const y = d.getFullYear();
+  const m = String(d.getMonth()+1).padStart(2,'0');
+  const day = String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
+// Today's records specifically — used for duplicate/near-duplicate checks
+// during check-in/check-out, which always concern TODAY regardless of
+// whichever day is currently picked in the "Viewing date" dropdown.
+function todayEntries(){
+  const todayKey = todayEventId();
+  return allEntries.filter(e => dateKeyFromMs(e.checkInAtMs) === todayKey);
+}
 
 // --- Google Vision API key handling ---
 // This placeholder is swapped for your real key by the GitHub Actions deploy
@@ -370,15 +405,20 @@ function initFirebase(){
 function listenForUpdates(){
   if(!db) return;
   if(unsubscribeSnapshot) unsubscribeSnapshot();
+  // No .where('eventId', ...) filter here on purpose: every day's records
+  // stay in the same collection and are always synced in full, so nothing
+  // is ever hidden just because it happened on a different calendar day.
+  // The dropdown below lets you pick which day's records to VIEW/export —
+  // that filtering happens client-side, after everything is already synced.
   unsubscribeSnapshot = db.collection('checkins')
-    .where('eventId', '==', eventId)
     .onSnapshot(snap => {
       const list = [];
       snap.forEach(doc => list.push(Object.assign({ id: doc.id }, doc.data())));
       list.sort((a,b) => (a.checkInAtMs||0) - (b.checkInAtMs||0));
-      entries = list;
+      allEntries = list;
       saveEntries();
-      renderTable();
+      refreshDateFilterOptions();
+      applyDateFilter();
       $('syncStatus').innerHTML = '🟢 Synced with other devices · live';
     }, err => {
       $('syncStatus').innerHTML = '<span style="color:var(--red);">🔴 Sync error: ' + escapeHtml(err.message) + ' — duplicate checks may miss other devices until this clears.</span>';
@@ -449,14 +489,15 @@ function applyRegistrationMatch(match){
   note.innerHTML = '✓ Matched conference registration' + (parts.length ? ' — ' + escapeHtml(parts.join(' · ')) : '');
 }
 
-// Finds this name's own check-in record for today (if they've already been
-// checked in — the usual reason to scan the same card again is to check
-// them out). Looked up from `entries`, which is kept live via the Firestore
-// listener, so this also finds a check-in done on a different device.
+// Finds this name's own check-in record FOR TODAY (if they've already been
+// checked in today — the usual reason to scan the same card again is to
+// check them out). Scoped to today on purpose: this looks up `allEntries`
+// (kept live via the Firestore listener, so it also finds a check-in done on
+// a different device), not the currently viewed date in the dropdown.
 function findExistingEntry(name){
   const norm = normalize(name);
   if(!norm) return null;
-  return entries.find(e => normalize(e.name) === norm) || null;
+  return todayEntries().find(e => normalize(e.name) === norm) || null;
 }
 
 // Copies Organization/Mobile straight from this person's own check-in record
@@ -477,14 +518,14 @@ function applyExistingEntry(existing){
   note.style.display = 'block';
   note.style.color = 'var(--blue)';
   note.style.background = 'var(--blue-bg)';
-  note.innerHTML = '↩ Already checked in today at ' + escapeHtml(fmtTime(existing.checkInAtMs)) +
+  note.innerHTML = '↩ Already checked in at ' + escapeHtml(fmtTime(existing.checkInAtMs)) +
     ' — Organization/Mobile No. copied from that check-in record.' +
     (existing.checkOutAtMs ? ' Already checked out at ' + escapeHtml(fmtTime(existing.checkOutAtMs)) + '.' : '');
 }
 
 // Single entry point used whenever the name field changes (after a scan or
 // manual edit): prefer this person's own existing check-in record if one
-// exists for today, otherwise fall back to matching the conference
+// exists, otherwise fall back to matching the conference
 // registration, otherwise flag Organization/Mobile No. as unmatched.
 function autoFillFromName(name){
   const existing = findExistingEntry(name);
@@ -515,13 +556,71 @@ function levenshtein(a,b){
 }
 
 function saveEntries(){
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(allEntries));
 }
 
 function fmtTime(ms){
   if(!ms) return '—';
   return new Date(ms).toLocaleString(undefined, { year:'numeric', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', hour12:true });
 }
+
+function formatDateKeyLabel(key){
+  if(key === '__all__') return 'All Dates';
+  if(key === 'unknown') return 'Unknown date';
+  const [y,m,d] = key.split('-').map(Number);
+  const dt = new Date(y, m-1, d);
+  return dt.toLocaleDateString(undefined, {weekday:'short', year:'numeric', month:'short', day:'numeric'});
+}
+
+// Currently selected value of the "Viewing date" dropdown — '__all__' means
+// every day combined. Defaults to today.
+let selectedDateFilter = todayEventId();
+
+// Rebuilds the dropdown's list of dates from whatever's currently in
+// allEntries, plus always includes today (even with zero check-ins yet), and
+// an "All Dates" option. Keeps the current selection if it's still valid.
+function refreshDateFilterOptions(){
+  const select = $('dateFilterSelect');
+  const todayKey = todayEventId();
+  const keys = new Set([todayKey]);
+  allEntries.forEach(e => keys.add(dateKeyFromMs(e.checkInAtMs)));
+  const sortedKeys = Array.from(keys).sort().reverse(); // newest first
+
+  const previousValue = select.value || selectedDateFilter;
+
+  select.innerHTML = '';
+  const allOption = document.createElement('option');
+  allOption.value = '__all__';
+  allOption.textContent = `All Dates (${allEntries.length})`;
+  select.appendChild(allOption);
+
+  sortedKeys.forEach(key => {
+    const count = allEntries.filter(e => dateKeyFromMs(e.checkInAtMs) === key).length;
+    const opt = document.createElement('option');
+    opt.value = key;
+    opt.textContent = formatDateKeyLabel(key) + (key === todayKey ? ' · Today' : '') + ` (${count})`;
+    select.appendChild(opt);
+  });
+
+  const values = Array.from(select.options).map(o => o.value);
+  selectedDateFilter = values.includes(previousValue) ? previousValue : todayKey;
+  select.value = selectedDateFilter;
+}
+
+// Filters allEntries down to whichever date is picked (or everything, for
+// "All Dates"), assigns it to `entries` for the table/export to use, and
+// re-renders.
+function applyDateFilter(){
+  entries = selectedDateFilter === '__all__'
+    ? allEntries
+    : allEntries.filter(e => dateKeyFromMs(e.checkInAtMs) === selectedDateFilter);
+  renderTable();
+}
+
+$('dateFilterSelect').addEventListener('change', e => {
+  selectedDateFilter = e.target.value;
+  applyDateFilter();
+});
 
 function renderTable(){
   $('countPill').textContent = entries.length;
@@ -827,7 +926,9 @@ function guessName(rawText){
 function checkSimilar(name){
   const norm = normalize(name);
   if(!norm){ $('similarWarning').innerHTML=''; return; }
-  const near = entries.find(e => {
+  // Scoped to today only — a similar name from a previous day isn't relevant
+  // to today's check-in.
+  const near = todayEntries().find(e => {
     const en = normalize(e.name);
     return en !== norm && levenshtein(en, norm) <= 1 && Math.min(en.length, norm.length) > 1;
   });
@@ -968,7 +1069,7 @@ async function checkOutWithFirebase(name, signature){
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     if(!snap.exists){
-      return { error: `No check-in record found for "${name}" today — check in first.` };
+      return { error: `No check-in record found for "${name}" — check in first.` };
     }
     const data = snap.data();
     if(data.checkOutAtMs){
@@ -1014,7 +1115,7 @@ $('checkinActionBtn').addEventListener('click', async () => {
       btn.textContent = 'Checking…';
       const result = await checkInWithFirebase(name, company, mobile, signature, registrationMatch);
       if(result.duplicate){
-        showBanner('dup', `⚠ DUPLICATE — ${name} already checked in today at ${fmtTime(result.existingCheckInAtMs)}. Do not issue a second voucher.`);
+        showBanner('dup', `⚠ DUPLICATE — ${name} already checked in at ${fmtTime(result.existingCheckInAtMs)}. Do not issue a second voucher.`);
         playErrorTone();
       } else {
         showBanner('ok', `✓ ${name} checked in at ${fmtTime(result.checkInAtMs)}. Voucher can be issued.`);
@@ -1022,16 +1123,16 @@ $('checkinActionBtn').addEventListener('click', async () => {
       }
       // The real-time listener will also update the table shortly; no need to push locally here.
     } else {
-      // No sync configured — single-device local-only check.
+      // No sync configured — single-device local-only check, scoped to today.
       const norm = normalize(name);
-      const existing = entries.find(e => normalize(e.name) === norm);
+      const existing = todayEntries().find(e => normalize(e.name) === norm);
       const nowMs = Date.now();
       if(existing){
-        showBanner('dup', `⚠ DUPLICATE — ${name} already checked in today at ${fmtTime(existing.checkInAtMs)}. Do not issue a second voucher.`);
+        showBanner('dup', `⚠ DUPLICATE — ${name} already checked in at ${fmtTime(existing.checkInAtMs)}. Do not issue a second voucher.`);
         playErrorTone();
       } else {
-        entries.push({
-          id: eventId + '__' + norm, name, company,
+        allEntries.push({
+          id: eventId + '__' + norm, name, company, eventId,
           checkInAtMs: nowMs, checkOutAtMs: null,
           checkInSignature: signature, checkOutSignature: null,
           mobile: mobile || '',
@@ -1042,7 +1143,8 @@ $('checkinActionBtn').addEventListener('click', async () => {
         showBanner('ok', `✓ ${name} checked in at ${fmtTime(nowMs)}. Voucher can be issued.`);
         playSuccessTone();
         saveEntries();
-        renderTable();
+        refreshDateFilterOptions();
+        applyDateFilter();
       }
     }
   }catch(err){
@@ -1085,10 +1187,13 @@ $('checkoutActionBtn').addEventListener('click', async () => {
       }
     } else {
       const norm = normalize(name);
-      const existing = entries.find(e => normalize(e.name) === norm);
+      // The object returned here is the same reference held inside
+      // allEntries (Array.find doesn't clone), so mutating it below updates
+      // the real source-of-truth list, not just a filtered copy.
+      const existing = todayEntries().find(e => normalize(e.name) === norm);
       const nowMs = Date.now();
       if(!existing){
-        showBanner('dup', `⚠ No check-in record found for "${name}" today — check in first.`);
+        showBanner('dup', `⚠ No check-in record found for "${name}" — check in first.`);
         playErrorTone();
       } else if(existing.checkOutAtMs){
         showBanner('dup', `⚠ ${existing.name} was already checked out at ${fmtTime(existing.checkOutAtMs)}.`);
@@ -1099,7 +1204,7 @@ $('checkoutActionBtn').addEventListener('click', async () => {
         showBanner('ok', `✓ ${existing.name} checked out at ${fmtTime(nowMs)}.`);
         playSuccessTone();
         saveEntries();
-        renderTable();
+        applyDateFilter();
       }
     }
   }catch(err){
@@ -1180,9 +1285,9 @@ $('exportBtn').addEventListener('click', async () => {
     const blob = new Blob([buffer], { type: 'application/octet-stream' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    const dateStr = new Date().toISOString().slice(0,10);
+    const fileTag = selectedDateFilter === '__all__' ? 'all-dates' : selectedDateFilter;
     a.href = url;
-    a.download = `voucher_checkins_${dateStr}.xlsx`;
+    a.download = `voucher_checkins_${fileTag}.xlsx`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -1196,19 +1301,26 @@ $('exportBtn').addEventListener('click', async () => {
 });
 
 $('clearBtn').addEventListener('click', async () => {
-  if(entries.length === 0 && !db){
+  if(allEntries.length === 0 && !db){
     localStorage.removeItem(STORAGE_KEY);
     return;
   }
+  // Clearing only affects whichever date is currently picked in the
+  // "Viewing date" dropdown — pick "All Dates" first if you really want to
+  // wipe everything.
+  const clearingAll = selectedDateFilter === '__all__';
+  const scopeLabel = clearingAll ? 'ALL check-in records (every day)' : `check-in records for ${formatDateKeyLabel(selectedDateFilter)}`;
   const msg = db
-    ? 'This will permanently clear today\'s check-in list for ALL synced devices (Firebase). Export to Excel first if you need a record. Continue?'
-    : 'This will permanently clear today\'s check-in list from this device. Export to Excel first if you need a record. Continue?';
+    ? `This will permanently clear ${scopeLabel} for ALL synced devices (Firebase). Export to Excel first if you need a record. Continue?`
+    : `This will permanently clear ${scopeLabel} from this device. Export to Excel first if you need a record. Continue?`;
   if(!confirm(msg)) return;
 
   if(db){
     try{
-      const snap = await db.collection('checkins').where('eventId', '==', eventId).get();
-      const docs = snap.docs;
+      const snap = await db.collection('checkins').get();
+      const docs = clearingAll
+        ? snap.docs
+        : snap.docs.filter(d => dateKeyFromMs(d.data().checkInAtMs) === selectedDateFilter);
       const chunkSize = 400; // Firestore batch limit is 500 writes
       for(let i = 0; i < docs.length; i += chunkSize){
         const batch = db.batch();
@@ -1219,13 +1331,17 @@ $('clearBtn').addEventListener('click', async () => {
       alert('Could not reach Firebase to clear it (' + err.message + '). Clearing this device only.');
     }
   }
-  entries = [];
+  allEntries = clearingAll
+    ? []
+    : allEntries.filter(e => dateKeyFromMs(e.checkInAtMs) !== selectedDateFilter);
   saveEntries();
-  renderTable();
+  refreshDateFilterOptions();
+  applyDateFilter();
   clearBanner();
 });
 
-renderTable();
+refreshDateFilterOptions();
+applyDateFilter();
 </script>
 
 </body>
