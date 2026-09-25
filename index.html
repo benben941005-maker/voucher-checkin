@@ -8,6 +8,11 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+<!-- Local, in-browser OCR (Tesseract.js). Used ONLY as a fallback when Google
+     Cloud Vision cannot be reached (no network) — it is slower and less
+     accurate, especially for Chinese names, so Vision is always tried first.
+     See runOcr()/localOcrFallback() below. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js"></script>
 <style>
   :root{
     --green:#1e8e3e; --green-bg:#e6f4ea;
@@ -189,10 +194,11 @@
 <script>
 // Registers the offline app-shell cache (sw.js, deployed alongside this
 // file). Once this has installed successfully while online, the app can be
-// opened again with zero network at all — everything except live scanning
-// (Vision OCR) and Firebase sync, which genuinely need a connection either
-// way. Safe to skip silently if the browser doesn't support it or sw.js
-// isn't present yet.
+// opened again with zero network at all. Firebase sync still needs a real
+// connection, but name-card scanning now has a local (in-browser) fallback —
+// see primeLocalOcrIfNeeded()/localOcrFallback() below — for when Google
+// Vision can't be reached. Safe to skip silently if the browser doesn't
+// support it or sw.js isn't present yet.
 if('serviceWorker' in navigator){
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('sw.js').catch(err => {
@@ -200,6 +206,10 @@ if('serviceWorker' in navigator){
     });
   });
 }
+// Quietly "warms up" the local OCR engine the first time the app is opened
+// while online, so its (fairly large) language files are already cached by
+// the service worker before anyone needs the offline fallback at the event.
+window.addEventListener('load', () => { primeLocalOcrIfNeeded(); });
 
 const STORAGE_KEY = 'voucherCheckinData_v3';
 // allEntries: every check-in record ever synced from Firebase, across every
@@ -950,56 +960,110 @@ function handleUploadedFile(file){
 // occasionally drop or misread rare/complex Chinese characters — if that
 // happens often, re-type the name manually when confirming.
 async function runOcr(dataUrl){
+  $('ocrStatus').textContent = 'Reading name card…';
+
+  let rawText = null;
+  let visionErr = null;
   const apiKey = getApiKey();
   if(!apiKey){
-    $('ocrStatus').innerHTML = '<span style="color:var(--red);">No Google Vision API key set. Open the settings above to add one, or type the name manually below.</span>';
-    $('nameInput').value = '';
-    $('companyInput').value = '';
-    $('mobileInput').value = '';
-    $('confirmCard').style.display = 'block';
-    applyRegistrationMatch(null);
-    return;
+    visionErr = new Error('No Google Vision API key set');
+  }else{
+    try{
+      const base64 = dataUrl.split(',')[1];
+      const resp = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          requests: [{
+            image: { content: base64 },
+            features: [{ type: 'TEXT_DETECTION' }],
+            imageContext: { languageHints: ['zh-Hant', 'zh', 'en'] }
+          }]
+        })
+      });
+      const data = await resp.json();
+      const result = data.responses && data.responses[0];
+      if(result && result.error){ throw new Error(result.error.message || 'Google Vision API error'); }
+      rawText = (result && result.fullTextAnnotation && result.fullTextAnnotation.text) || '';
+    }catch(err){
+      visionErr = err;
+    }
   }
-  $('ocrStatus').textContent = 'Reading name card…';
-  try{
-    const base64 = dataUrl.split(',')[1];
 
-    const resp = await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        requests: [{
-          image: { content: base64 },
-          features: [{ type: 'TEXT_DETECTION' }],
-          imageContext: { languageHints: ['zh-Hant', 'zh', 'en'] }
-        }]
-      })
-    });
-    const data = await resp.json();
-    const result = data.responses && data.responses[0];
-    if(result && result.error){ throw new Error(result.error.message || 'Google Vision API error'); }
-
-    const rawText = (result && result.fullTextAnnotation && result.fullTextAnnotation.text) || '';
+  if(rawText !== null){
+    // Google Vision succeeded — the normal, most-accurate path.
     const name = guessName(rawText);
-
     $('rawText').textContent = rawText || '(no response)';
     $('rawTextWrap').style.display = rawText ? 'block' : 'none';
     $('ocrStatus').textContent = name ? 'Scan complete. Please confirm the name below.' : 'Could not read a name clearly — please type it manually.';
-
     $('nameInput').value = name;
     $('companyInput').value = '';
     $('mobileInput').value = '';
     $('confirmCard').style.display = 'block';
     checkSimilar(name);
     autoFillFromName(name);
-  }catch(err){
-    $('ocrStatus').innerHTML = '<span style="color:var(--red);">Scan failed: ' + escapeHtml(err.message) + '. Please type the name manually.</span>';
+    return;
+  }
+
+  // Google Vision failed (most commonly: no network) — fall back to local,
+  // in-browser OCR (Tesseract.js). It only works once it has been "primed"
+  // on this device while online (see primeLocalOcrIfNeeded), and it is
+  // noticeably less accurate than Vision, especially for Chinese names, so
+  // it's always the second choice, never the first.
+  $('ocrStatus').textContent = 'Google Vision unavailable (' + visionErr.message + ') — trying local offline recognition…';
+  try{
+    const localText = await localOcrRecognize(dataUrl);
+    const name = guessName(localText);
+    $('rawText').textContent = localText || '(no response)';
+    $('rawTextWrap').style.display = localText ? 'block' : 'none';
+    $('ocrStatus').innerHTML = '<span style="color:var(--amber);">⚠ Used local offline recognition (lower accuracy than usual) — please double-check the name below.</span>';
+    $('nameInput').value = name;
+    $('companyInput').value = '';
+    $('mobileInput').value = '';
+    $('confirmCard').style.display = 'block';
+    checkSimilar(name);
+    autoFillFromName(name);
+  }catch(localErr){
+    $('ocrStatus').innerHTML = '<span style="color:var(--red);">Scan failed: ' + escapeHtml(visionErr.message) + '. Please type the name manually.</span>';
     $('nameInput').value = '';
     $('companyInput').value = '';
     $('mobileInput').value = '';
     $('confirmCard').style.display = 'block';
     applyRegistrationMatch(null);
   }
+}
+
+// --- Local (in-browser) OCR fallback, for when Google Vision can't be
+// reached at all. Uses Tesseract.js, which runs entirely on-device — no
+// server call — but is slower and noticeably less accurate than Vision,
+// especially for Chinese names, so it's only ever tried after Vision fails.
+const TESSERACT_LANGS = 'chi_tra+eng';
+
+async function localOcrRecognize(dataUrl){
+  if(typeof Tesseract === 'undefined'){
+    throw new Error('Local OCR is not ready on this device yet (open this app once while online first)');
+  }
+  const result = await Tesseract.recognize(dataUrl, TESSERACT_LANGS);
+  return (result && result.data && result.data.text) || '';
+}
+
+// A tiny 1x1 placeholder image, used only to trigger Tesseract's one-time
+// asset download (its worker script + WASM engine + Chinese/English language
+// data — several MB in total) while the device is online, so the offline
+// app cache (sw.js) has a chance to store them BEFORE they're ever needed
+// for a real scan at the event. The recognition result itself is discarded.
+const BLANK_PRIME_IMAGE = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+const LOCAL_OCR_PRIMED_KEY = 'localOcrPrimed_v1';
+
+function primeLocalOcrIfNeeded(){
+  try{
+    if(localStorage.getItem(LOCAL_OCR_PRIMED_KEY)) return;
+    if(!navigator.onLine) return;
+    if(typeof Tesseract === 'undefined') return;
+    localOcrRecognize(BLANK_PRIME_IMAGE)
+      .then(() => { try{ localStorage.setItem(LOCAL_OCR_PRIMED_KEY, '1'); }catch(e){} })
+      .catch(err => console.warn('Local OCR warm-up did not finish (will retry next time the app opens online):', err.message));
+  }catch(e){ /* localStorage unavailable — safe to just skip priming */ }
 }
 
 // Business cards mix a person's name in with the company name, job title,
