@@ -8,11 +8,18 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
-<!-- Local, in-browser OCR (Tesseract.js). Used ONLY as a fallback when Google
-     Cloud Vision cannot be reached (no network) — it is slower and less
-     accurate, especially for Chinese names, so Vision is always tried first.
-     See runOcr()/localOcrFallback() below. -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js"></script>
+<!-- Local, in-browser OCR (Baidu's PaddleOCR, via @paddlejs-models/ocr) is
+     loaded lazily further down via a dynamic import() — not as a plain
+     script tag — and used ONLY as a fallback when Google Cloud Vision cannot be
+     reached (no network). It's the same OCR engine family PaddleOCR itself
+     is built on, chosen specifically because it's trained for Chinese text
+     (unlike Tesseract, which this app tried first and found too unreliable
+     on Chinese names). Still expect it to read Chinese less reliably than
+     Vision — test with a handful of real name cards before the event. See
+     ensurePaddleOcrReady()/localOcrRecognize() below. -->
+<script>
+  const PADDLE_OCR_MODULE_URL = 'https://cdn.jsdelivr.net/npm/@paddlejs-models/ocr@1.2.4/+esm';
+</script>
 <style>
   :root{
     --green:#1e8e3e; --green-bg:#e6f4ea;
@@ -196,7 +203,7 @@
 // file). Once this has installed successfully while online, the app can be
 // opened again with zero network at all. Firebase sync still needs a real
 // connection, but name-card scanning now has a local (in-browser) fallback —
-// see primeLocalOcrIfNeeded()/localOcrFallback() below — for when Google
+// see primeLocalOcrIfNeeded()/localOcrRecognize() below — for when Google
 // Vision can't be reached. Safe to skip silently if the browser doesn't
 // support it or sw.js isn't present yet.
 if('serviceWorker' in navigator){
@@ -1034,33 +1041,64 @@ async function runOcr(dataUrl){
 }
 
 // --- Local (in-browser) OCR fallback, for when Google Vision can't be
-// reached at all. Uses Tesseract.js, which runs entirely on-device — no
-// server call — but is slower and noticeably less accurate than Vision,
-// especially for Chinese names, so it's only ever tried after Vision fails.
-const TESSERACT_LANGS = 'chi_tra+eng';
+// reached at all. Uses @paddlejs-models/ocr — Baidu's own browser build of
+// PaddleOCR, specifically trained on Chinese/English/number text — loaded
+// on demand via dynamic import() (see PADDLE_OCR_MODULE_URL in <head>), so
+// nothing is downloaded unless/until it's actually needed. Still runs
+// entirely on-device — no server call — and is expected to be noticeably
+// less accurate than Vision, so it's only ever tried after Vision fails,
+// and every result is shown for the user to double-check, never auto-saved
+// blind. IMPORTANT: test this with a handful of real name cards before the
+// event — no local OCR is as reliable as Vision, and this app already tried
+// (and dropped) Tesseract.js after it proved too unreliable on Chinese names.
+let paddleOcrModulePromise = null;
+let paddleOcrInitPromise = null;
 
-async function localOcrRecognize(dataUrl){
-  if(typeof Tesseract === 'undefined'){
-    throw new Error('Local OCR is not ready on this device yet (open this app once while online first)');
+function loadPaddleOcrModule(){
+  if(!paddleOcrModulePromise){
+    paddleOcrModulePromise = import(/* webpackIgnore: true */ PADDLE_OCR_MODULE_URL);
   }
-  const result = await Tesseract.recognize(dataUrl, TESSERACT_LANGS);
-  return (result && result.data && result.data.text) || '';
+  return paddleOcrModulePromise;
 }
 
-// A tiny 1x1 placeholder image, used only to trigger Tesseract's one-time
-// asset download (its worker script + WASM engine + Chinese/English language
-// data — several MB in total) while the device is online, so the offline
-// app cache (sw.js) has a chance to store them BEFORE they're ever needed
-// for a real scan at the event. The recognition result itself is discarded.
-const BLANK_PRIME_IMAGE = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
-const LOCAL_OCR_PRIMED_KEY = 'localOcrPrimed_v1';
+async function ensurePaddleOcrReady(){
+  const mod = await loadPaddleOcrModule();
+  if(!paddleOcrInitPromise){
+    paddleOcrInitPromise = mod.init().catch(err => { paddleOcrInitPromise = null; throw err; });
+  }
+  await paddleOcrInitPromise;
+  return mod;
+}
 
+function loadImageFromDataUrl(dataUrl){
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Could not decode the captured photo for local OCR'));
+    img.src = dataUrl;
+  });
+}
+
+async function localOcrRecognize(dataUrl){
+  const mod = await ensurePaddleOcrReady();
+  const img = await loadImageFromDataUrl(dataUrl);
+  const res = await mod.recognize(img);
+  const text = res && res.text;
+  if(Array.isArray(text)) return text.join('\n');
+  return text || '';
+}
+
+// Quietly downloads and initializes the PaddleOCR model the first time the
+// app is opened while online, so its (multi-MB) model files are already
+// cached by the service worker before anyone needs the offline fallback at
+// the event — see the "cache everything except live API calls" strategy in
+// sw.js.
+const LOCAL_OCR_PRIMED_KEY = 'localOcrPrimed_v2';
 function primeLocalOcrIfNeeded(){
   try{
     if(localStorage.getItem(LOCAL_OCR_PRIMED_KEY)) return;
     if(!navigator.onLine) return;
-    if(typeof Tesseract === 'undefined') return;
-    localOcrRecognize(BLANK_PRIME_IMAGE)
+    ensurePaddleOcrReady()
       .then(() => { try{ localStorage.setItem(LOCAL_OCR_PRIMED_KEY, '1'); }catch(e){} })
       .catch(err => console.warn('Local OCR warm-up did not finish (will retry next time the app opens online):', err.message));
   }catch(e){ /* localStorage unavailable — safe to just skip priming */ }
