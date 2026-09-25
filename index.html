@@ -12,7 +12,7 @@
     --green:#1e8e3e; --green-bg:#e6f4ea;
     --red:#c5221f; --red-bg:#fce8e6;
     --amber:#b06000; --amber-bg:#fef3e0;
-    --blue:#1a73e8; --border:#dadce0; --text:#202124; --muted:#5f6368;
+    --blue:#1a73e8; --blue-bg:#e8f0fe; --border:#dadce0; --text:#202124; --muted:#5f6368;
   }
   *{box-sizing:border-box;}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;margin:0;background:#f6f7f9;color:var(--text);}
@@ -449,6 +449,52 @@ function applyRegistrationMatch(match){
   note.innerHTML = '✓ Matched conference registration' + (parts.length ? ' — ' + escapeHtml(parts.join(' · ')) : '');
 }
 
+// Finds this name's own check-in record for today (if they've already been
+// checked in — the usual reason to scan the same card again is to check
+// them out). Looked up from `entries`, which is kept live via the Firestore
+// listener, so this also finds a check-in done on a different device.
+function findExistingEntry(name){
+  const norm = normalize(name);
+  if(!norm) return null;
+  return entries.find(e => normalize(e.name) === norm) || null;
+}
+
+// Copies Organization/Mobile straight from this person's own check-in record
+// instead of re-running the conference-registration match. This matters most
+// for someone who wasn't found in the registration list at check-in time:
+// their Organization/Mobile No. were typed in by hand back then, and without
+// this, scanning their card again at check-out would show the same "no
+// match" red boxes and ask staff to re-type the same details a second time.
+function applyExistingEntry(existing){
+  const note = $('registrationMatchNote');
+  const companyInput = $('companyInput');
+  const mobileInput = $('mobileInput');
+  companyInput.classList.remove('no-match');
+  mobileInput.classList.remove('no-match');
+  if(!companyInput.value.trim() && existing.company) companyInput.value = existing.company;
+  if(!mobileInput.value.trim() && existing.mobile) mobileInput.value = existing.mobile;
+
+  note.style.display = 'block';
+  note.style.color = 'var(--blue)';
+  note.style.background = 'var(--blue-bg)';
+  note.innerHTML = '↩ Already checked in today at ' + escapeHtml(fmtTime(existing.checkInAtMs)) +
+    ' — Organization/Mobile No. copied from that check-in record.' +
+    (existing.checkOutAtMs ? ' Already checked out at ' + escapeHtml(fmtTime(existing.checkOutAtMs)) + '.' : '');
+}
+
+// Single entry point used whenever the name field changes (after a scan or
+// manual edit): prefer this person's own existing check-in record if one
+// exists for today, otherwise fall back to matching the conference
+// registration, otherwise flag Organization/Mobile No. as unmatched.
+function autoFillFromName(name){
+  const existing = findExistingEntry(name);
+  if(existing){
+    applyExistingEntry(existing);
+    return;
+  }
+  applyRegistrationMatch(findRegistrationMatch(name));
+}
+
 initFirebase();
 
 function normalize(name){
@@ -733,7 +779,7 @@ async function runOcr(dataUrl){
     $('mobileInput').value = '';
     $('confirmCard').style.display = 'block';
     checkSimilar(name);
-    applyRegistrationMatch(findRegistrationMatch(name));
+    autoFillFromName(name);
   }catch(err){
     $('ocrStatus').innerHTML = '<span style="color:var(--red);">Scan failed: ' + escapeHtml(err.message) + '. Please type the name manually.</span>';
     $('nameInput').value = '';
@@ -794,7 +840,7 @@ function checkSimilar(name){
 
 $('nameInput').addEventListener('input', e => {
   checkSimilar(e.target.value);
-  applyRegistrationMatch(findRegistrationMatch(e.target.value));
+  autoFillFromName(e.target.value);
 });
 
 // --- Signature pad ---
