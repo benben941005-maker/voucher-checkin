@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Voucher Check-In / Check-Out</title>
+<link rel="manifest" href="manifest.json">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
@@ -186,6 +187,20 @@
 </div>
 
 <script>
+// Registers the offline app-shell cache (sw.js, deployed alongside this
+// file). Once this has installed successfully while online, the app can be
+// opened again with zero network at all — everything except live scanning
+// (Vision OCR) and Firebase sync, which genuinely need a connection either
+// way. Safe to skip silently if the browser doesn't support it or sw.js
+// isn't present yet.
+if('serviceWorker' in navigator){
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(err => {
+      console.warn('Offline app cache (service worker) did not register:', err.message);
+    });
+  });
+}
+
 const STORAGE_KEY = 'voucherCheckinData_v3';
 // allEntries: every check-in record ever synced from Firebase, across every
 // day — nothing is ever filtered out at the sync/storage level, so no day's
@@ -414,16 +429,108 @@ function listenForUpdates(){
     .onSnapshot(snap => {
       const list = [];
       snap.forEach(doc => list.push(Object.assign({ id: doc.id }, doc.data())));
+
+      // Merge in anything still waiting to sync from THIS device (offline
+      // check-ins/check-outs not yet pushed to Firebase) — otherwise this
+      // snapshot would overwrite allEntries and wipe those out before they
+      // get a chance to sync.
+      const byId = new Map(list.map(e => [e.id, e]));
+      allEntries.forEach(local => {
+        if(!local.pendingSync) return;
+        const serverEntry = byId.get(local.id);
+        if(!serverEntry){
+          // Server doesn't have this check-in at all yet — keep our copy.
+          list.push(local);
+        } else if(local.checkOutAtMs && !serverEntry.checkOutAtMs){
+          // Server has the check-in but not our (still unsynced) check-out.
+          serverEntry.checkOutAtMs = local.checkOutAtMs;
+          serverEntry.checkOutSignature = local.checkOutSignature;
+          serverEntry.pendingSync = true;
+        }
+      });
+
       list.sort((a,b) => (a.checkInAtMs||0) - (b.checkInAtMs||0));
       allEntries = list;
       saveEntries();
       refreshDateFilterOptions();
       applyDateFilter();
       $('syncStatus').innerHTML = '🟢 Synced with other devices · live';
+      trySyncPendingEntries();
     }, err => {
       $('syncStatus').innerHTML = '<span style="color:var(--red);">🔴 Sync error: ' + escapeHtml(err.message) + ' — duplicate checks may miss other devices until this clears.</span>';
     });
 }
+
+// Pushes any offline-saved check-ins/check-outs (pendingSync: true) up to
+// Firebase, using the same atomic doc-exists check as a normal check-in so
+// two devices that both went offline and checked the same person in don't
+// silently clobber each other — whichever one syncs first "wins" the
+// check-in doc, and the loser is flagged (syncConflict) for manual review
+// instead of being silently dropped or overwritten.
+let syncInProgress = false;
+async function trySyncPendingEntries(){
+  if(!db || syncInProgress) return;
+  const pending = allEntries.filter(e => e.pendingSync);
+  if(pending.length === 0) return;
+  syncInProgress = true;
+  $('syncStatus').innerHTML = `🟡 Syncing ${pending.length} offline record(s)…`;
+  for(const entry of pending){
+    try{
+      const ref = db.collection('checkins').doc(entry.id);
+      await db.runTransaction(async (tx) => {
+        const snap = await tx.get(ref);
+        if(!snap.exists){
+          tx.set(ref, {
+            name: entry.name, company: entry.company || '',
+            eventId: entry.eventId || eventId, norm: normalize(entry.name),
+            checkInAtMs: entry.checkInAtMs, checkOutAtMs: entry.checkOutAtMs || null,
+            checkInSignature: entry.checkInSignature || null,
+            checkOutSignature: entry.checkOutSignature || null,
+            mobile: entry.mobile || '', email: entry.email || '',
+            physicianNo: entry.physicianNo || '',
+            registrationMatched: !!entry.registrationMatched
+          });
+        } else {
+          const data = snap.data();
+          if(entry.checkOutAtMs && !data.checkOutAtMs){
+            tx.update(ref, { checkOutAtMs: entry.checkOutAtMs, checkOutSignature: entry.checkOutSignature || null });
+          } else if(normalize(data.name) !== normalize(entry.name)){
+            // Extremely unlikely (same docId, different name somehow) —
+            // flag for manual review rather than guessing which is right.
+            entry.syncConflict = true;
+          }
+        }
+      });
+      entry.pendingSync = false;
+    }catch(err){
+      // Leave pendingSync true — will retry automatically on the next pass
+      // (still offline, or a transient error).
+      console.warn('Could not sync', entry.name, '—', err.message);
+    }
+  }
+  saveEntries();
+  refreshDateFilterOptions();
+  applyDateFilter();
+  syncInProgress = false;
+  const stillPending = allEntries.filter(e => e.pendingSync).length;
+  $('syncStatus').innerHTML = stillPending
+    ? `<span style="color:var(--amber);">🟡 ${stillPending} record(s) saved on this device, waiting to sync — will retry automatically.</span>`
+    : '🟢 Synced with other devices · live';
+}
+
+// Reconnect strategy: the browser's 'online' event fires when connectivity
+// comes back (not perfectly reliable on every device, especially iOS, hence
+// also polling below). If Firebase never connected at all (e.g. no network
+// when the page first loaded, so the SDK script itself never downloaded),
+// retrying initFirebase() here can only succeed once that script is
+// actually available — which is exactly what the offline app cache (see the
+// service worker) is for.
+window.addEventListener('online', () => {
+  if(!db){ initFirebase(); } else { trySyncPendingEntries(); }
+});
+setInterval(() => {
+  if(!db){ initFirebase(); } else { trySyncPendingEntries(); }
+}, 20000);
 
 // --- Registration lookup: if this event also has a separate conference
 // registration form (see the "registrations_iccm2026" collection written by
@@ -629,9 +736,15 @@ function renderTable(){
     return;
   }
   const rows = entries.slice().reverse().map(e => {
-    const statusBadge = e.checkOutAtMs
+    let statusBadge = e.checkOutAtMs
       ? '<span class="status-badge status-out">Checked Out</span>'
       : '<span class="status-badge status-in">Checked In</span>';
+    if(e.pendingSync){
+      statusBadge += '<br><span style="font-size:11px;color:var(--amber);">🟡 Saved on device — syncing…</span>';
+    }
+    if(e.syncConflict){
+      statusBadge += '<br><span style="font-size:11px;color:var(--red);">⚠ Sync conflict — check for duplicate</span>';
+    }
     const sigIn = e.checkInSignature
       ? `<img class="sig-thumb" data-sig-label="Check-in signature — ${escapeHtml(e.name)}" src="${e.checkInSignature}">`
       : '<span class="muted-dash">—</span>';
@@ -1113,48 +1226,68 @@ $('checkinActionBtn').addEventListener('click', async () => {
   try{
     if(db){
       btn.textContent = 'Checking…';
-      const result = await checkInWithFirebase(name, company, mobile, signature, registrationMatch);
-      if(result.duplicate){
-        showBanner('dup', `⚠ DUPLICATE — ${name} already checked in at ${fmtTime(result.existingCheckInAtMs)}. Do not issue a second voucher.`);
-        playErrorTone();
-      } else {
-        showBanner('ok', `✓ ${name} checked in at ${fmtTime(result.checkInAtMs)}. Voucher can be issued.`);
-        playSuccessTone();
+      try{
+        const result = await checkInWithFirebase(name, company, mobile, signature, registrationMatch);
+        if(result.duplicate){
+          showBanner('dup', `⚠ DUPLICATE — ${name} already checked in at ${fmtTime(result.existingCheckInAtMs)}. Do not issue a second voucher.`);
+          playErrorTone();
+        } else {
+          showBanner('ok', `✓ ${name} checked in at ${fmtTime(result.checkInAtMs)}. Voucher can be issued.`);
+          playSuccessTone();
+        }
+        // The real-time listener will also update the table shortly; no need to push locally here.
+      }catch(networkErr){
+        // Could not reach Firebase — most likely no network right now. Don't
+        // lose the check-in: save it on THIS device instead (checked for
+        // duplicates against today's records already synced here), and it
+        // will sync to Firebase automatically once connectivity returns.
+        checkInLocallyWithFallback(name, company, mobile, signature, registrationMatch, true);
       }
-      // The real-time listener will also update the table shortly; no need to push locally here.
     } else {
-      // No sync configured — single-device local-only check, scoped to today.
-      const norm = normalize(name);
-      const existing = todayEntries().find(e => normalize(e.name) === norm);
-      const nowMs = Date.now();
-      if(existing){
-        showBanner('dup', `⚠ DUPLICATE — ${name} already checked in at ${fmtTime(existing.checkInAtMs)}. Do not issue a second voucher.`);
-        playErrorTone();
-      } else {
-        allEntries.push({
-          id: eventId + '__' + norm, name, company, eventId,
-          checkInAtMs: nowMs, checkOutAtMs: null,
-          checkInSignature: signature, checkOutSignature: null,
-          mobile: mobile || '',
-          email: (registrationMatch && registrationMatch.email) || '',
-          physicianNo: (registrationMatch && registrationMatch.physicianNo) || '',
-          registrationMatched: !!registrationMatch
-        });
-        showBanner('ok', `✓ ${name} checked in at ${fmtTime(nowMs)}. Voucher can be issued.`);
-        playSuccessTone();
-        saveEntries();
-        refreshDateFilterOptions();
-        applyDateFilter();
-      }
+      // No sync configured at all on this device — single-device local-only check.
+      checkInLocallyWithFallback(name, company, mobile, signature, registrationMatch, false);
     }
   }catch(err){
-    showBanner('warn', `⚠ Could not check in — could not reach Firebase: ${err.message}`);
+    showBanner('warn', `⚠ Could not check in: ${err.message}`);
   } finally {
     btn.disabled = false;
     btn.textContent = originalLabel;
     resetCaptureUi();
   }
 });
+
+// Shared by both "no Firebase configured" and "Firebase configured but
+// unreachable right now" — saves the check-in on this device so it's never
+// lost, and (when pendingSync is true) marks it to be pushed to Firebase
+// automatically once connectivity is back (see trySyncPendingEntries).
+function checkInLocallyWithFallback(name, company, mobile, signature, registrationMatch, pendingSync){
+  const norm = normalize(name);
+  const existing = todayEntries().find(e => normalize(e.name) === norm);
+  const nowMs = Date.now();
+  if(existing){
+    showBanner('dup', `⚠ DUPLICATE — ${name} already checked in at ${fmtTime(existing.checkInAtMs)}. Do not issue a second voucher.`);
+    playErrorTone();
+    return;
+  }
+  allEntries.push({
+    id: eventId + '__' + norm, name, company, eventId,
+    checkInAtMs: nowMs, checkOutAtMs: null,
+    checkInSignature: signature, checkOutSignature: null,
+    mobile: mobile || '',
+    email: (registrationMatch && registrationMatch.email) || '',
+    physicianNo: (registrationMatch && registrationMatch.physicianNo) || '',
+    registrationMatched: !!registrationMatch,
+    pendingSync: !!pendingSync
+  });
+  const label = pendingSync
+    ? `✓ ${name} checked in at ${fmtTime(nowMs)} — saved on this device (no network right now), will sync automatically once back online. Voucher can be issued.`
+    : `✓ ${name} checked in at ${fmtTime(nowMs)}. Voucher can be issued.`;
+  showBanner('ok', label);
+  playSuccessTone();
+  saveEntries();
+  refreshDateFilterOptions();
+  applyDateFilter();
+}
 
 $('checkoutActionBtn').addEventListener('click', async () => {
   const name = $('nameInput').value.trim();
@@ -1177,44 +1310,66 @@ $('checkoutActionBtn').addEventListener('click', async () => {
   try{
     if(db){
       btn.textContent = 'Checking…';
-      const result = await checkOutWithFirebase(name, signature);
-      if(result.error){
-        showBanner('dup', '⚠ ' + result.error);
-        playErrorTone();
-      } else {
-        showBanner('ok', `✓ ${result.name} checked out at ${fmtTime(result.checkOutAtMs)}.`);
-        playSuccessTone();
+      try{
+        const result = await checkOutWithFirebase(name, signature);
+        if(result.error){
+          showBanner('dup', '⚠ ' + result.error);
+          playErrorTone();
+        } else {
+          showBanner('ok', `✓ ${result.name} checked out at ${fmtTime(result.checkOutAtMs)}.`);
+          playSuccessTone();
+        }
+      }catch(networkErr){
+        // Could not reach Firebase — fall back to this device's own record
+        // of today's check-ins so check-out still works, and mark it to
+        // sync automatically once connectivity is back.
+        checkOutLocallyWithFallback(name, signature, true);
       }
     } else {
-      const norm = normalize(name);
-      // The object returned here is the same reference held inside
-      // allEntries (Array.find doesn't clone), so mutating it below updates
-      // the real source-of-truth list, not just a filtered copy.
-      const existing = todayEntries().find(e => normalize(e.name) === norm);
-      const nowMs = Date.now();
-      if(!existing){
-        showBanner('dup', `⚠ No check-in record found for "${name}" — check in first.`);
-        playErrorTone();
-      } else if(existing.checkOutAtMs){
-        showBanner('dup', `⚠ ${existing.name} was already checked out at ${fmtTime(existing.checkOutAtMs)}.`);
-        playErrorTone();
-      } else {
-        existing.checkOutAtMs = nowMs;
-        existing.checkOutSignature = signature;
-        showBanner('ok', `✓ ${existing.name} checked out at ${fmtTime(nowMs)}.`);
-        playSuccessTone();
-        saveEntries();
-        applyDateFilter();
-      }
+      checkOutLocallyWithFallback(name, signature, false);
     }
   }catch(err){
-    showBanner('warn', `⚠ Could not check out — could not reach Firebase: ${err.message}`);
+    showBanner('warn', `⚠ Could not check out: ${err.message}`);
   } finally {
     btn.disabled = false;
     btn.textContent = originalLabel;
     resetCaptureUi();
   }
 });
+
+// Shared by both "no Firebase configured" and "Firebase configured but
+// unreachable right now". Looks up today's check-in record on THIS device
+// (which — thanks to the Firestore listener merging pending records back in
+// — includes anything already synced from other devices too, as long as
+// this device was online at some point after that sync happened).
+function checkOutLocallyWithFallback(name, signature, pendingSync){
+  const norm = normalize(name);
+  // The object returned here is the same reference held inside allEntries
+  // (Array.find doesn't clone), so mutating it below updates the real
+  // source-of-truth list, not just a filtered copy.
+  const existing = todayEntries().find(e => normalize(e.name) === norm);
+  const nowMs = Date.now();
+  if(!existing){
+    showBanner('dup', `⚠ No check-in record found for "${name}" — check in first.`);
+    playErrorTone();
+    return;
+  }
+  if(existing.checkOutAtMs){
+    showBanner('dup', `⚠ ${existing.name} was already checked out at ${fmtTime(existing.checkOutAtMs)}.`);
+    playErrorTone();
+    return;
+  }
+  existing.checkOutAtMs = nowMs;
+  existing.checkOutSignature = signature;
+  if(pendingSync) existing.pendingSync = true;
+  const label = pendingSync
+    ? `✓ ${existing.name} checked out at ${fmtTime(nowMs)} — saved on this device (no network right now), will sync automatically once back online.`
+    : `✓ ${existing.name} checked out at ${fmtTime(nowMs)}.`;
+  showBanner('ok', label);
+  playSuccessTone();
+  saveEntries();
+  applyDateFilter();
+}
 
 // Exporting with ExcelJS (not the lighter SheetJS used elsewhere) specifically
 // because SheetJS's free/community build cannot embed images into a workbook —
@@ -1246,6 +1401,9 @@ $('exportBtn').addEventListener('click', async () => {
     entries.forEach((e, i) => {
       const rowIndex = i + 2; // header occupies row 1
       const matched = !!e.registrationMatched;
+      let statusText = e.checkOutAtMs ? 'Checked Out' : 'Checked In';
+      if(e.pendingSync) statusText += ' (offline — syncing)';
+      if(e.syncConflict) statusText += ' (⚠ sync conflict — verify)';
       sheet.addRow([
         e.name,
         e.company || '',
@@ -1255,7 +1413,7 @@ $('exportBtn').addEventListener('click', async () => {
         matched ? 'Matched' : 'No Match — Verify',
         e.checkInAtMs ? new Date(e.checkInAtMs).toLocaleString() : '',
         e.checkOutAtMs ? new Date(e.checkOutAtMs).toLocaleString() : '',
-        e.checkOutAtMs ? 'Checked Out' : 'Checked In',
+        statusText,
         '', ''
       ]);
       sheet.getRow(rowIndex).height = 50;
