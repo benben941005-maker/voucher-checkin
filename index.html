@@ -141,11 +141,21 @@
     </details>
   </div>
 
+  <div class="card" id="pendingScansCard">
+    <h2>Or Pick from Computer Scan Station <span class="count-pill" id="pendingScansCountPill">0</span></h2>
+    <div id="pendingScansStatus" style="font-size:12px;color:var(--muted);margin-bottom:8px;"></div>
+    <div id="pendingScansList"><div class="empty">No pending scans from the computer station yet.</div></div>
+  </div>
+
   <div class="card" id="confirmCard" style="display:none;">
     <h2>2. Confirm Details</h2>
     <div class="field">
-      <label for="nameInput">Name</label>
-      <input type="text" id="nameInput" placeholder="Edit if OCR got it wrong">
+      <label for="chineseNameInput">Chinese Name 中文姓名</label>
+      <input type="text" id="chineseNameInput" placeholder="Edit if OCR got it wrong / 如OCR有误请修改">
+    </div>
+    <div class="field">
+      <label for="englishNameInput">English Name 英文姓名</label>
+      <input type="text" id="englishNameInput" placeholder="Edit if OCR got it wrong">
     </div>
     <div class="field">
       <label for="companyInput">Company / Organization (auto-filled if matched with registration, check-in only)</label>
@@ -218,7 +228,17 @@ if('serviceWorker' in navigator){
 // the service worker before anyone needs the offline fallback at the event.
 window.addEventListener('load', () => { primeLocalOcrIfNeeded(); });
 
-const STORAGE_KEY = 'voucherCheckinData_v3';
+// Bumped to v4: check-in records now store separate chineseName/englishName
+// fields instead of one combined `name` field (see the Chinese/English name
+// split + cross-name duplicate detection added below), so any old locally
+// cached data under the previous key is deliberately left behind rather than
+// mixed in under the new schema. Export to Excel first if you still need any
+// records under the old key on a given device — Firebase-synced data itself
+// isn't touched by this, but old Firestore `checkins` test documents (from
+// before this update) also predate the chineseName/englishName split and the
+// checkinKeys alias collection, so they won't be found by the new duplicate
+// checks either — clear old test data via the Clear button before real use.
+const STORAGE_KEY = 'voucherCheckinData_v4';
 // allEntries: every check-in record ever synced from Firebase, across every
 // day — nothing is ever filtered out at the sync/storage level, so no day's
 // data can look "wiped" just from opening the app later.
@@ -426,6 +446,7 @@ function initFirebase(){
     db = firebase.firestore();
     listenForUpdates();
     listenForRegistrations();
+    listenForPendingScans();
   }catch(err){
     db = null;
     const msg = '🔴 Firebase did NOT connect (' + err.message + '). Duplicate checks are local-only on this device right now.';
@@ -493,36 +514,66 @@ async function trySyncPendingEntries(){
   $('syncStatus').innerHTML = `🟡 Syncing ${pending.length} offline record(s)…`;
   for(const entry of pending){
     try{
-      const ref = db.collection('checkins').doc(entry.id);
+      // entry.id is used AS the canonical checkins doc ID for anything
+      // created locally (see generateLocalEntryId) — this keeps the merge
+      // logic in listenForUpdates() above working unchanged (it matches
+      // local.id against the synced doc's id).
+      const checkinRef = db.collection('checkins').doc(entry.id);
+      const normZh = normalize(entry.chineseName || '');
+      const normEn = normalize(entry.englishName || '');
+      const keyZhRef = checkinKeyRef('zh', normZh);
+      const keyEnRef = checkinKeyRef('en', normEn);
+
       await db.runTransaction(async (tx) => {
-        const snap = await tx.get(ref);
-        if(!snap.exists){
-          tx.set(ref, {
-            name: entry.name, company: entry.company || '',
-            eventId: entry.eventId || eventId, norm: normalize(entry.name),
-            checkInAtMs: entry.checkInAtMs, checkOutAtMs: entry.checkOutAtMs || null,
-            checkInSignature: entry.checkInSignature || null,
-            checkOutSignature: entry.checkOutSignature || null,
-            mobile: entry.mobile || '', email: entry.email || '',
-            physicianNo: entry.physicianNo || '',
-            registrationMatched: !!entry.registrationMatched
-          });
-        } else {
-          const data = snap.data();
+        const [selfSnap, zhSnap, enSnap] = await Promise.all([
+          tx.get(checkinRef),
+          keyZhRef ? tx.get(keyZhRef) : Promise.resolve(null),
+          keyEnRef ? tx.get(keyEnRef) : Promise.resolve(null)
+        ]);
+
+        if(selfSnap.exists){
+          // Already synced before (this is a retry) — just push a check-out
+          // that happened locally since then, if any, and make sure both
+          // alias keys exist.
+          const data = selfSnap.data();
           if(entry.checkOutAtMs && !data.checkOutAtMs){
-            tx.update(ref, { checkOutAtMs: entry.checkOutAtMs, checkOutSignature: entry.checkOutSignature || null });
-          } else if(normalize(data.name) !== normalize(entry.name)){
-            // Extremely unlikely (same docId, different name somehow) —
-            // flag for manual review rather than guessing which is right.
-            entry.syncConflict = true;
+            tx.update(checkinRef, { checkOutAtMs: entry.checkOutAtMs, checkOutSignature: entry.checkOutSignature || null });
           }
+          if(keyZhRef && !(zhSnap && zhSnap.exists)) tx.set(keyZhRef, { checkinId: entry.id });
+          if(keyEnRef && !(enSnap && enSnap.exists)) tx.set(keyEnRef, { checkinId: entry.id });
+          return;
         }
+
+        // Brand new to Firebase — but another device may have already
+        // checked this SAME person in (under either name variant) while
+        // this device was offline. Flag it for manual review rather than
+        // silently creating a second record.
+        const conflictId = (zhSnap && zhSnap.exists && zhSnap.data().checkinId) ||
+                            (enSnap && enSnap.exists && enSnap.data().checkinId) || null;
+        if(conflictId && conflictId !== entry.id){
+          entry.syncConflict = true;
+          return;
+        }
+
+        tx.set(checkinRef, {
+          chineseName: entry.chineseName || '', englishName: entry.englishName || '',
+          company: entry.company || '', eventId: entry.eventId || eventId,
+          normZh, normEn,
+          checkInAtMs: entry.checkInAtMs, checkOutAtMs: entry.checkOutAtMs || null,
+          checkInSignature: entry.checkInSignature || null,
+          checkOutSignature: entry.checkOutSignature || null,
+          mobile: entry.mobile || '', email: entry.email || '',
+          physicianNo: entry.physicianNo || '',
+          registrationMatched: !!entry.registrationMatched
+        });
+        if(keyZhRef) tx.set(keyZhRef, { checkinId: entry.id });
+        if(keyEnRef) tx.set(keyEnRef, { checkinId: entry.id });
       });
-      entry.pendingSync = false;
+      if(!entry.syncConflict) entry.pendingSync = false;
     }catch(err){
       // Leave pendingSync true — will retry automatically on the next pass
       // (still offline, or a transient error).
-      console.warn('Could not sync', entry.name, '—', err.message);
+      console.warn('Could not sync', combineNames(entry.chineseName, entry.englishName), '—', err.message);
     }
   }
   saveEntries();
@@ -573,12 +624,111 @@ function listenForRegistrations(){
   });
 }
 
-function findRegistrationMatch(name){
-  const norm = normalize(name);
-  if(!norm) return null;
+// --- Pending scans: name cards scanned at a separate computer scan station
+// (scan_station.html, sharing this same Firebase project), written here as
+// "pre-scanned, not yet checked in". Staff at this check-in counter pick one
+// from the list below instead of re-scanning, confirm/edit the details, get
+// the guest to sign, and complete Check-In as normal — which then marks the
+// pending scan as consumed so it drops off everyone's list. Purely a
+// convenience: scanning or typing a name directly here still works exactly
+// as before, with or without the station.
+const PENDING_SCANS_COLLECTION = 'pendingScans';
+let pendingScans = [];
+let unsubscribePendingScans = null;
+// Which pending-scan doc (if any) is currently loaded into the confirm form —
+// cleared on every fresh scan/manual pick, and marked consumed once Check-In
+// actually completes (see consumeActivePendingScanIfAny).
+let activePendingScanId = null;
+
+function listenForPendingScans(){
+  if(!db) return;
+  if(unsubscribePendingScans) unsubscribePendingScans();
+  unsubscribePendingScans = db.collection(PENDING_SCANS_COLLECTION)
+    .where('consumed', '==', false)
+    .onSnapshot(snap => {
+      const list = [];
+      snap.forEach(doc => list.push(Object.assign({ id: doc.id }, doc.data())));
+      list.sort((a,b) => (b.scannedAtMs||0) - (a.scannedAtMs||0));
+      pendingScans = list;
+      $('pendingScansStatus').textContent = '';
+      renderPendingScans();
+    }, err => {
+      $('pendingScansStatus').innerHTML = '<span style="color:var(--red);">Could not load computer-station scans: ' + escapeHtml(err.message) + '</span>';
+    });
+}
+
+function renderPendingScans(){
+  $('pendingScansCountPill').textContent = pendingScans.length;
+  const wrap = $('pendingScansList');
+  if(!pendingScans.length){
+    wrap.innerHTML = '<div class="empty">No pending scans from the computer station yet.</div>';
+    return;
+  }
+  wrap.innerHTML = pendingScans.map(p => `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);">
+      <div style="min-width:0;">
+        <div style="font-weight:600;">${escapeHtml(p.name || '(no name)')}</div>
+        <div style="font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml([p.company, p.mobile].filter(Boolean).join(' · ') || 'No company/mobile captured')}</div>
+      </div>
+      <button class="btn-secondary btn-small use-pending-scan-btn" data-id="${escapeHtml(p.id)}" style="flex-shrink:0;">Use This ▸</button>
+    </div>
+  `).join('');
+}
+
+$('pendingScansList').addEventListener('click', e => {
+  const btn = e.target.closest('.use-pending-scan-btn');
+  if(!btn) return;
+  usePendingScan(btn.dataset.id);
+});
+
+function usePendingScan(id){
+  const scan = pendingScans.find(p => p.id === id);
+  if(!scan) return;
+  clearBanner();
+  activePendingScanId = id;
+  $('preview').style.display = 'none';
+  $('rawTextWrap').style.display = 'none';
+  $('ocrStatus').textContent = '📋 Loaded from computer scan station — please confirm the details below.';
+  // scan_station.html only captures a single best-guess "name" field (it
+  // doesn't separate Chinese/English) — bucket it into whichever of the two
+  // fields it looks like it belongs in, same heuristic as guessNames() below.
+  const guess = classifyScannedName(scan.name || '');
+  $('chineseNameInput').value = guess.chineseName;
+  $('englishNameInput').value = guess.englishName;
+  $('companyInput').value = scan.company || '';
+  $('mobileInput').value = scan.mobile || '';
+  $('confirmCard').style.display = 'block';
+  $('confirmCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  checkSimilar(guess.chineseName, guess.englishName);
+  autoFillFromNames(guess.chineseName, guess.englishName);
+}
+
+// Marks the pending scan this check-in was loaded from as done, so it drops
+// off the shared list once the guest has actually been checked in — never
+// blocks or fails the check-in itself if this update doesn't go through.
+async function consumeActivePendingScanIfAny(){
+  if(!activePendingScanId) return;
+  const id = activePendingScanId;
+  activePendingScanId = null;
+  if(db){
+    try{
+      await db.collection(PENDING_SCANS_COLLECTION).doc(id).update({ consumed: true, consumedAtMs: Date.now() });
+    }catch(err){
+      console.warn('Could not mark pending scan as consumed (it may linger in the list):', err.message);
+    }
+  } else {
+    pendingScans = pendingScans.filter(p => p.id !== id);
+    renderPendingScans();
+  }
+}
+
+function findRegistrationMatch(chineseName, englishName){
+  const normZh = normalize(chineseName || '');
+  const normEn = normalize(englishName || '');
+  if(!normZh && !normEn) return null;
   return registrations.find(r =>
-    (r.chineseName && normalize(r.chineseName) === norm) ||
-    (r.englishName && normalize(r.englishName) === norm)
+    (normZh && r.chineseName && normalize(r.chineseName) === normZh) ||
+    (normEn && r.englishName && normalize(r.englishName) === normEn)
   ) || null;
 }
 
@@ -586,6 +736,8 @@ function applyRegistrationMatch(match){
   const note = $('registrationMatchNote');
   const companyInput = $('companyInput');
   const mobileInput = $('mobileInput');
+  const chineseNameInput = $('chineseNameInput');
+  const englishNameInput = $('englishNameInput');
   if(!match){
     note.className = '';
     note.style.display = 'block';
@@ -598,8 +750,15 @@ function applyRegistrationMatch(match){
   }
   companyInput.classList.remove('no-match');
   mobileInput.classList.remove('no-match');
-  // Only fill in the field if the user hasn't already typed something into it —
-  // never silently overwrite a manual correction.
+  // Only fill in a field if the user hasn't already typed something into it —
+  // never silently overwrite a manual correction. This also bridges a card
+  // scan that only picked up ONE of the two printed names: once matched to a
+  // registration, BOTH names get filled in from that single registration
+  // record, so a later scan/check-out that only captures the OTHER name
+  // variant still resolves to the same person — see findExistingEntry /
+  // autoFillFromNames below.
+  if(!chineseNameInput.value.trim() && match.chineseName) chineseNameInput.value = match.chineseName;
+  if(!englishNameInput.value.trim() && match.englishName) englishNameInput.value = match.englishName;
   if(!companyInput.value.trim() && match.organization) companyInput.value = match.organization;
   if(!mobileInput.value.trim() && match.mobile) mobileInput.value = match.mobile;
 
@@ -618,10 +777,17 @@ function applyRegistrationMatch(match){
 // check them out). Scoped to today on purpose: this looks up `allEntries`
 // (kept live via the Firestore listener, so it also finds a check-in done on
 // a different device), not the currently viewed date in the dropdown.
-function findExistingEntry(name){
-  const norm = normalize(name);
-  if(!norm) return null;
-  return todayEntries().find(e => normalize(e.name) === norm) || null;
+function findExistingEntry(chineseName, englishName){
+  const normZh = normalize(chineseName || '');
+  const normEn = normalize(englishName || '');
+  if(!normZh && !normEn) return null;
+  // Matches on EITHER name variant — catches the case where this person was
+  // scanned/typed with one name at check-in and the other name (e.g. OCR
+  // picked up a different line this time) at check-out.
+  return todayEntries().find(e =>
+    (normZh && e.chineseName && normalize(e.chineseName) === normZh) ||
+    (normEn && e.englishName && normalize(e.englishName) === normEn)
+  ) || null;
 }
 
 // Copies Organization/Mobile straight from this person's own check-in record
@@ -634,8 +800,12 @@ function applyExistingEntry(existing){
   const note = $('registrationMatchNote');
   const companyInput = $('companyInput');
   const mobileInput = $('mobileInput');
+  const chineseNameInput = $('chineseNameInput');
+  const englishNameInput = $('englishNameInput');
   companyInput.classList.remove('no-match');
   mobileInput.classList.remove('no-match');
+  if(!chineseNameInput.value.trim() && existing.chineseName) chineseNameInput.value = existing.chineseName;
+  if(!englishNameInput.value.trim() && existing.englishName) englishNameInput.value = existing.englishName;
   if(!companyInput.value.trim() && existing.company) companyInput.value = existing.company;
   if(!mobileInput.value.trim() && existing.mobile) mobileInput.value = existing.mobile;
 
@@ -643,27 +813,60 @@ function applyExistingEntry(existing){
   note.style.color = 'var(--blue)';
   note.style.background = 'var(--blue-bg)';
   note.innerHTML = '↩ Already checked in at ' + escapeHtml(fmtTime(existing.checkInAtMs)) +
-    ' — Organization/Mobile No. copied from that check-in record.' +
+    ' — Name/Organization/Mobile No. copied from that check-in record.' +
     (existing.checkOutAtMs ? ' Already checked out at ' + escapeHtml(fmtTime(existing.checkOutAtMs)) + '.' : '');
 }
 
-// Single entry point used whenever the name field changes (after a scan or
-// manual edit): prefer this person's own existing check-in record if one
-// exists, otherwise fall back to matching the conference
-// registration, otherwise flag Organization/Mobile No. as unmatched.
-function autoFillFromName(name){
-  const existing = findExistingEntry(name);
+// Single entry point used whenever either name field changes (after a scan
+// or manual edit). Two passes, in this order:
+//  1. Try the conference registration match FIRST (using whichever name(s)
+//     are filled in right now) and, if found, backfill BOTH name fields from
+//     that one registration record — this is what lets a later scan that
+//     only captured the OTHER name variant (e.g. OCR read the English line
+//     this time instead of the Chinese line) still resolve to the same
+//     registered person.
+//  2. THEN look for this person's own existing check-in record for today,
+//     now checking BOTH (possibly just-backfilled) name fields — so it's
+//     found regardless of which name variant was used to create it.
+// An existing check-in record wins (shows "already checked in") over a
+// plain registration-match note, same priority as before this change.
+function autoFillFromNames(chineseName, englishName){
+  const registrationMatch = findRegistrationMatch(chineseName, englishName);
+  if(registrationMatch){
+    applyRegistrationMatch(registrationMatch);
+  }
+  // Re-read the inputs — applyRegistrationMatch may have just backfilled
+  // whichever name field was blank.
+  const zh = $('chineseNameInput').value.trim();
+  const en = $('englishNameInput').value.trim();
+  const existing = findExistingEntry(zh, en);
   if(existing){
     applyExistingEntry(existing);
     return;
   }
-  applyRegistrationMatch(findRegistrationMatch(name));
+  if(!registrationMatch){
+    applyRegistrationMatch(null);
+  }
 }
 
 initFirebase();
 
 function normalize(name){
   return name.replace(/\s+/g,'').toLowerCase();
+}
+
+// Combines the two name fields into one human-readable label for banners,
+// error messages and the export sheet. Falls back to the legacy single
+// `name` field for any older record synced from before this Chinese/English
+// name split (e.g. old test data still in Firebase) so it doesn't just show
+// up blank.
+function combineNames(chineseName, englishName){
+  if(chineseName && englishName) return chineseName + ' (' + englishName + ')';
+  return chineseName || englishName || '';
+}
+function displayName(entry){
+  if(!entry) return '';
+  return combineNames(entry.chineseName, entry.englishName) || entry.name || '';
 }
 
 // Simple Levenshtein distance for near-duplicate warning
@@ -762,14 +965,18 @@ function renderTable(){
     if(e.syncConflict){
       statusBadge += '<br><span style="font-size:11px;color:var(--red);">⚠ Sync conflict — check for duplicate</span>';
     }
+    const label = escapeHtml(displayName(e));
     const sigIn = e.checkInSignature
-      ? `<img class="sig-thumb" data-sig-label="Check-in signature — ${escapeHtml(e.name)}" src="${e.checkInSignature}">`
+      ? `<img class="sig-thumb" data-sig-label="Check-in signature — ${label}" src="${e.checkInSignature}">`
       : '<span class="muted-dash">—</span>';
     const sigOut = e.checkOutSignature
-      ? `<img class="sig-thumb" data-sig-label="Check-out signature — ${escapeHtml(e.name)}" src="${e.checkOutSignature}">`
+      ? `<img class="sig-thumb" data-sig-label="Check-out signature — ${label}" src="${e.checkOutSignature}">`
       : '<span class="muted-dash">—</span>';
+    const nameCell = e.chineseName && e.englishName
+      ? `${escapeHtml(e.chineseName)}<br><span style="color:var(--muted);font-size:11px;">${escapeHtml(e.englishName)}</span>`
+      : escapeHtml(e.chineseName || e.englishName || e.name || '');
     return `<tr>
-      <td>${escapeHtml(e.name)}</td>
+      <td>${nameCell}</td>
       <td>${escapeHtml(e.company||'')}</td>
       <td>${fmtTime(e.checkInAtMs)}</td>
       <td>${fmtTime(e.checkOutAtMs)}</td>
@@ -957,9 +1164,10 @@ function handleUploadedFile(file){
 }
 
 // Uses Google Cloud Vision's TEXT_DETECTION to OCR the whole card, then
-// guessName() below picks out the line that's most likely to be the
-// individual PERSON's name (as opposed to the company/organization name,
-// job title, address, phone number, etc.) from the raw text Vision returns.
+// guessNames() below picks out the line(s) most likely to be the individual
+// PERSON's Chinese and/or English name (as opposed to the company/
+// organization name, job title, address, phone number, etc.) from the raw
+// text Vision returns.
 // Company is intentionally NOT extracted here: it's only ever filled in from
 // a matching conference registration (see applyRegistrationMatch), or typed
 // in manually.
@@ -967,6 +1175,7 @@ function handleUploadedFile(file){
 // occasionally drop or misread rare/complex Chinese characters — if that
 // happens often, re-type the name manually when confirming.
 async function runOcr(dataUrl){
+  activePendingScanId = null;
   $('ocrStatus').textContent = 'Reading name card…';
 
   let rawText = null;
@@ -999,16 +1208,19 @@ async function runOcr(dataUrl){
 
   if(rawText !== null){
     // Google Vision succeeded — the normal, most-accurate path.
-    const name = guessName(rawText);
+    const names = guessNames(rawText);
     $('rawText').textContent = rawText || '(no response)';
     $('rawTextWrap').style.display = rawText ? 'block' : 'none';
-    $('ocrStatus').textContent = name ? 'Scan complete. Please confirm the name below.' : 'Could not read a name clearly — please type it manually.';
-    $('nameInput').value = name;
+    $('ocrStatus').textContent = (names.chineseName || names.englishName)
+      ? 'Scan complete. Please confirm the name(s) below.'
+      : 'Could not read a name clearly — please type it manually.';
+    $('chineseNameInput').value = names.chineseName;
+    $('englishNameInput').value = names.englishName;
     $('companyInput').value = '';
     $('mobileInput').value = '';
     $('confirmCard').style.display = 'block';
-    checkSimilar(name);
-    autoFillFromName(name);
+    checkSimilar(names.chineseName, names.englishName);
+    autoFillFromNames(names.chineseName, names.englishName);
     return;
   }
 
@@ -1020,19 +1232,21 @@ async function runOcr(dataUrl){
   $('ocrStatus').textContent = 'Google Vision unavailable (' + visionErr.message + ') — trying local offline recognition…';
   try{
     const localText = await localOcrRecognize(dataUrl);
-    const name = guessName(localText);
+    const names = guessNames(localText);
     $('rawText').textContent = localText || '(no response)';
     $('rawTextWrap').style.display = localText ? 'block' : 'none';
-    $('ocrStatus').innerHTML = '<span style="color:var(--amber);">⚠ Used local offline recognition (lower accuracy than usual) — please double-check the name below.</span>';
-    $('nameInput').value = name;
+    $('ocrStatus').innerHTML = '<span style="color:var(--amber);">⚠ Used local offline recognition (lower accuracy than usual) — please double-check the name(s) below.</span>';
+    $('chineseNameInput').value = names.chineseName;
+    $('englishNameInput').value = names.englishName;
     $('companyInput').value = '';
     $('mobileInput').value = '';
     $('confirmCard').style.display = 'block';
-    checkSimilar(name);
-    autoFillFromName(name);
+    checkSimilar(names.chineseName, names.englishName);
+    autoFillFromNames(names.chineseName, names.englishName);
   }catch(localErr){
     $('ocrStatus').innerHTML = '<span style="color:var(--red);">Scan failed: ' + escapeHtml(visionErr.message) + '. Please type the name manually.</span>';
-    $('nameInput').value = '';
+    $('chineseNameInput').value = '';
+    $('englishNameInput').value = '';
     $('companyInput').value = '';
     $('mobileInput').value = '';
     $('confirmCard').style.display = 'block';
@@ -1114,8 +1328,12 @@ const COMPANY_HINTS = /(pte\.?\s*ltd|pty\.?\s*ltd|\bltd\.?\b|\bllc\b|\bllp\b|\bi
 const TITLE_HINTS = /(manager|director|president|chairman|founder|\bceo\b|\bcfo\b|\bcoo\b|executive|consultant|specialist|physician|doctor|\bdr\.?\b|\bprof\.?\b|professor|经理|总监|董事|总裁|主任|医师|医生|教授|顾问|负责人|marketing|officer)/i;
 const CONTACT_HINTS = /(@|https?:\/\/|www\.|电话|手机|传真|邮箱|email|tel:|fax:|address|地址)/i;
 
-function guessName(rawText){
-  if(!rawText) return '';
+// Most cards for this event print BOTH a Chinese name line AND an English
+// name line for the same person, so this looks for each shape independently
+// in one pass over the OCR text instead of returning only whichever comes
+// first — that's what lets a single scan fill in both name fields at once.
+function guessNames(rawText){
+  if(!rawText) return { chineseName: '', englishName: '' };
   const lines = rawText.split('\n').map(l => l.trim()).filter(Boolean);
   const candidates = [];
   for(const line of lines){
@@ -1126,38 +1344,66 @@ function guessName(rawText){
     candidates.push(line);
   }
   // A short line made up purely of Chinese characters (2-4 is typical for a
-  // Chinese personal name) is the strongest signal.
-  const chineseName = candidates.find(l => /^[一-鿿·]{2,4}$/.test(l));
-  if(chineseName) return chineseName;
-  // Otherwise, fall back to a short line of letters shaped like a Western
-  // personal name (1-4 words, letters/punctuation only).
-  const englishName = candidates.find(l => /^[A-Za-z][A-Za-z.\-' ]{1,40}$/.test(l) && l.split(/\s+/).length <= 4);
-  if(englishName) return englishName;
-  // Last resort: the first surviving candidate line, or failing that, just
-  // the very first line on the card.
-  return candidates[0] || lines[0] || '';
+  // Chinese personal name) is the strongest signal for the Chinese field.
+  const chineseName = candidates.find(l => /^[一-鿿·]{2,4}$/.test(l)) || '';
+  // A short line of letters shaped like a Western personal name (1-4 words,
+  // letters/punctuation only) for the English field.
+  const englishName = candidates.find(l => /^[A-Za-z][A-Za-z.\-' ]{1,40}$/.test(l) && l.split(/\s+/).length <= 4) || '';
+  if(chineseName || englishName) return { chineseName, englishName };
+  // Neither shape matched anything — last resort: the first surviving
+  // candidate line, or failing that, just the very first line on the card,
+  // bucketed by whether it looks like it contains Chinese characters.
+  const fallback = candidates[0] || lines[0] || '';
+  return classifyScannedName(fallback);
 }
 
-function checkSimilar(name){
-  const norm = normalize(name);
-  if(!norm){ $('similarWarning').innerHTML=''; return; }
+// Buckets a single already-guessed name string (e.g. from the computer scan
+// station's single "name" field, which doesn't separate the two, or the
+// guessNames() fallback above) into whichever of the two fields it looks
+// like it belongs in.
+function classifyScannedName(text){
+  const t = (text || '').trim();
+  if(!t) return { chineseName: '', englishName: '' };
+  return /[一-鿿]/.test(t) ? { chineseName: t, englishName: '' } : { chineseName: '', englishName: t };
+}
+
+function checkSimilar(chineseName, englishName){
+  const normZh = normalize(chineseName || '');
+  const normEn = normalize(englishName || '');
+  if(!normZh && !normEn){ $('similarWarning').innerHTML=''; return; }
   // Scoped to today only — a similar name from a previous day isn't relevant
-  // to today's check-in.
+  // to today's check-in. Each name variant is only compared against the SAME
+  // variant on existing records (a similar Chinese name is only flagged
+  // against other Chinese names, and likewise for English) — cross-variant
+  // matching is already handled as an exact-match duplicate by
+  // findExistingEntry/autoFillFromNames above, not a "similar, please
+  // double check" warning.
   const near = todayEntries().find(e => {
-    const en = normalize(e.name);
-    return en !== norm && levenshtein(en, norm) <= 1 && Math.min(en.length, norm.length) > 1;
+    if(normZh && e.chineseName){
+      const ezh = normalize(e.chineseName);
+      if(ezh !== normZh && levenshtein(ezh, normZh) <= 1 && Math.min(ezh.length, normZh.length) > 1) return true;
+    }
+    if(normEn && e.englishName){
+      const een = normalize(e.englishName);
+      if(een !== normEn && levenshtein(een, normEn) <= 1 && Math.min(een.length, normEn.length) > 1) return true;
+    }
+    return false;
   });
   if(near){
-    $('similarWarning').innerHTML = `<div class="banner warn">Note: a similar name "${escapeHtml(near.name)}" was already checked in today. Please verify this isn't the same person.</div>`;
+    $('similarWarning').innerHTML = `<div class="banner warn">Note: a similar name "${escapeHtml(displayName(near))}" was already checked in today. Please verify this isn't the same person.</div>`;
   } else {
     $('similarWarning').innerHTML = '';
   }
 }
 
-$('nameInput').addEventListener('input', e => {
-  checkSimilar(e.target.value);
-  autoFillFromName(e.target.value);
-});
+function onNameFieldInput(){
+  const zh = $('chineseNameInput').value;
+  const en = $('englishNameInput').value;
+  checkSimilar(zh, en);
+  autoFillFromNames(zh, en);
+}
+$('chineseNameInput').addEventListener('input', onNameFieldInput);
+$('englishNameInput').addEventListener('input', onNameFieldInput);
 
 // --- Signature pad ---
 // A plain canvas + Pointer Events (covers mouse, touch and pen with one code
@@ -1236,23 +1482,51 @@ function resetCaptureUi(){
   $('fileInput').value = '';
   resetSignaturePad();
   applyRegistrationMatch(null);
+  activePendingScanId = null;
 }
 
-// Atomic check-and-create: uses the normalized name as a fixed Firestore document ID
-// inside a transaction, so two devices racing to register the same person resolve
-// against a single document instead of a whole-sheet lock — typically well under a second.
-async function checkInWithFirebase(name, company, mobile, signature, registrationInfo){
-  const norm = normalize(name);
-  const docId = eventId + '__' + norm;
-  const ref = db.collection('checkins').doc(docId);
+// Duplicate prevention now has to work even when the SAME person is scanned
+// with a DIFFERENT name variant at check-in vs. check-out (e.g. OCR read the
+// Chinese line the first time, the English line the second time). A single
+// deterministic document ID derived from the name text can't handle that —
+// whichever variant is missing at doc-creation time would produce a
+// different ID later. Instead: the canonical check-in record gets an
+// auto-generated ID, and up to two small "alias" lookup documents (one per
+// name variant that's actually present) in a separate `checkinKeys`
+// collection each just point at that canonical ID. Checking in/out always
+// looks up BOTH alias keys — whichever one exists (if any) resolves to the
+// same canonical record, regardless of which name was captured this time.
+// All of this still runs inside one Firestore transaction, so two devices
+// racing to check the same person in still resolve safely (whichever wins
+// the transaction creates the canonical doc + alias keys first; the loser's
+// alias lookup then finds it and reports a duplicate).
+function checkinKeyRef(kind, norm){
+  return norm ? db.collection('checkinKeys').doc(eventId + '__' + kind + '__' + norm) : null;
+}
+
+async function checkInWithFirebase(chineseName, englishName, company, mobile, signature, registrationInfo){
+  const normZh = normalize(chineseName || '');
+  const normEn = normalize(englishName || '');
+  const keyZhRef = checkinKeyRef('zh', normZh);
+  const keyEnRef = checkinKeyRef('en', normEn);
   const nowMs = Date.now();
+
   return db.runTransaction(async (tx) => {
-    const snap = await tx.get(ref);
-    if(snap.exists){
-      return { duplicate: true, existingCheckInAtMs: snap.data().checkInAtMs };
+    const [zhSnap, enSnap] = await Promise.all([
+      keyZhRef ? tx.get(keyZhRef) : Promise.resolve(null),
+      keyEnRef ? tx.get(keyEnRef) : Promise.resolve(null)
+    ]);
+    const existingCheckinId = (zhSnap && zhSnap.exists && zhSnap.data().checkinId) ||
+                               (enSnap && enSnap.exists && enSnap.data().checkinId) || null;
+    if(existingCheckinId){
+      const existingSnap = await tx.get(db.collection('checkins').doc(existingCheckinId));
+      return { duplicate: true, existingCheckInAtMs: existingSnap.exists ? existingSnap.data().checkInAtMs : nowMs };
     }
-    tx.set(ref, {
-      name, company, eventId, norm,
+
+    const checkinRef = db.collection('checkins').doc();
+    tx.set(checkinRef, {
+      chineseName: chineseName || '', englishName: englishName || '',
+      company, eventId, normZh, normEn,
       checkInAtMs: nowMs,
       checkOutAtMs: null,
       checkInSignature: signature || null,
@@ -1270,41 +1544,62 @@ async function checkInWithFirebase(name, company, mobile, signature, registratio
       // rows in the Excel export.
       registrationMatched: !!registrationInfo
     });
+    if(keyZhRef) tx.set(keyZhRef, { checkinId: checkinRef.id });
+    if(keyEnRef) tx.set(keyEnRef, { checkinId: checkinRef.id });
     return { duplicate: false, checkInAtMs: nowMs };
   });
 }
 
-// Same atomic pattern for checking out — locates the existing check-in record
-// by the same name-derived document ID and refuses a second check-out.
-async function checkOutWithFirebase(name, signature){
-  const norm = normalize(name);
-  const docId = eventId + '__' + norm;
-  const ref = db.collection('checkins').doc(docId);
+// Same alias-key lookup for checking out — resolves to the canonical record
+// via whichever name variant this scan captured, and refuses a second
+// check-out.
+async function checkOutWithFirebase(chineseName, englishName, signature){
+  const normZh = normalize(chineseName || '');
+  const normEn = normalize(englishName || '');
+  const keyZhRef = checkinKeyRef('zh', normZh);
+  const keyEnRef = checkinKeyRef('en', normEn);
   const nowMs = Date.now();
+
   return db.runTransaction(async (tx) => {
-    const snap = await tx.get(ref);
+    const [zhSnap, enSnap] = await Promise.all([
+      keyZhRef ? tx.get(keyZhRef) : Promise.resolve(null),
+      keyEnRef ? tx.get(keyEnRef) : Promise.resolve(null)
+    ]);
+    const checkinId = (zhSnap && zhSnap.exists && zhSnap.data().checkinId) ||
+                       (enSnap && enSnap.exists && enSnap.data().checkinId) || null;
+    if(!checkinId){
+      return { error: `No check-in record found for "${combineNames(chineseName, englishName)}" — check in first.` };
+    }
+    const checkinRef = db.collection('checkins').doc(checkinId);
+    const snap = await tx.get(checkinRef);
     if(!snap.exists){
-      return { error: `No check-in record found for "${name}" — check in first.` };
+      return { error: `No check-in record found for "${combineNames(chineseName, englishName)}" — check in first.` };
     }
     const data = snap.data();
     if(data.checkOutAtMs){
-      return { error: `${data.name} was already checked out at ${fmtTime(data.checkOutAtMs)}.` };
+      return { error: `${combineNames(data.chineseName, data.englishName)} was already checked out at ${fmtTime(data.checkOutAtMs)}.` };
     }
-    tx.update(ref, { checkOutAtMs: nowMs, checkOutSignature: signature || null });
-    return { name: data.name, checkOutAtMs: nowMs };
+    tx.update(checkinRef, { checkOutAtMs: nowMs, checkOutSignature: signature || null });
+    // Backfill any alias key this checkout scan captured that check-in
+    // didn't (e.g. this scan finally caught the Chinese name too) — purely
+    // to strengthen future duplicate protection, never required.
+    if(keyZhRef && !(zhSnap && zhSnap.exists)) tx.set(keyZhRef, { checkinId });
+    if(keyEnRef && !(enSnap && enSnap.exists)) tx.set(keyEnRef, { checkinId });
+    return { chineseName: data.chineseName, englishName: data.englishName, checkOutAtMs: nowMs };
   });
 }
 
 $('checkinActionBtn').addEventListener('click', async () => {
-  const name = $('nameInput').value.trim();
+  const chineseName = $('chineseNameInput').value.trim();
+  const englishName = $('englishNameInput').value.trim();
   const company = $('companyInput').value.trim();
   const mobile = $('mobileInput').value.trim();
-  if(!name){
-    alert('Please enter a name before checking in.');
+  if(!chineseName && !englishName){
+    alert('Please enter at least one of Chinese Name / English Name before checking in.');
     return;
   }
 
-  const registrationMatch = findRegistrationMatch(name);
+  const registrationMatch = findRegistrationMatch(chineseName, englishName);
   if(!registrationMatch && !mobile){
     alert('No matching conference registration found for this name. Please type in the Mobile No. manually before checking in.');
     $('mobileInput').focus();
@@ -1325,16 +1620,21 @@ $('checkinActionBtn').addEventListener('click', async () => {
   // as a direct result of a user gesture.
   getAudioCtx();
 
+  // If this check-in was loaded from the computer scan station's pending
+  // list, this guest is now being dealt with one way or another (checked in
+  // fresh, or found to already be checked in) — so it's done with either way.
+  await consumeActivePendingScanIfAny();
+
   try{
     if(db){
       btn.textContent = 'Checking…';
       try{
-        const result = await checkInWithFirebase(name, company, mobile, signature, registrationMatch);
+        const result = await checkInWithFirebase(chineseName, englishName, company, mobile, signature, registrationMatch);
         if(result.duplicate){
-          showBanner('dup', `⚠ DUPLICATE — ${name} already checked in at ${fmtTime(result.existingCheckInAtMs)}. Do not issue a second voucher.`);
+          showBanner('dup', `⚠ DUPLICATE — ${combineNames(chineseName, englishName)} already checked in at ${fmtTime(result.existingCheckInAtMs)}. Do not issue a second voucher.`);
           playErrorTone();
         } else {
-          showBanner('ok', `✓ ${name} checked in at ${fmtTime(result.checkInAtMs)}. Voucher can be issued.`);
+          showBanner('ok', `✓ ${combineNames(chineseName, englishName)} checked in at ${fmtTime(result.checkInAtMs)}. Voucher can be issued.`);
           playSuccessTone();
         }
         // The real-time listener will also update the table shortly; no need to push locally here.
@@ -1343,11 +1643,11 @@ $('checkinActionBtn').addEventListener('click', async () => {
         // lose the check-in: save it on THIS device instead (checked for
         // duplicates against today's records already synced here), and it
         // will sync to Firebase automatically once connectivity returns.
-        checkInLocallyWithFallback(name, company, mobile, signature, registrationMatch, true);
+        checkInLocallyWithFallback(chineseName, englishName, company, mobile, signature, registrationMatch, true);
       }
     } else {
       // No sync configured at all on this device — single-device local-only check.
-      checkInLocallyWithFallback(name, company, mobile, signature, registrationMatch, false);
+      checkInLocallyWithFallback(chineseName, englishName, company, mobile, signature, registrationMatch, false);
     }
   }catch(err){
     showBanner('warn', `⚠ Could not check in: ${err.message}`);
@@ -1362,17 +1662,22 @@ $('checkinActionBtn').addEventListener('click', async () => {
 // unreachable right now" — saves the check-in on this device so it's never
 // lost, and (when pendingSync is true) marks it to be pushed to Firebase
 // automatically once connectivity is back (see trySyncPendingEntries).
-function checkInLocallyWithFallback(name, company, mobile, signature, registrationMatch, pendingSync){
-  const norm = normalize(name);
-  const existing = todayEntries().find(e => normalize(e.name) === norm);
+// Local-only ID, used both as this device's array key AND (once synced) as
+// the actual Firestore `checkins` document ID — see trySyncPendingEntries.
+function generateLocalEntryId(){
+  return eventId + '__local__' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+function checkInLocallyWithFallback(chineseName, englishName, company, mobile, signature, registrationMatch, pendingSync){
+  const existing = findExistingEntry(chineseName, englishName);
   const nowMs = Date.now();
   if(existing){
-    showBanner('dup', `⚠ DUPLICATE — ${name} already checked in at ${fmtTime(existing.checkInAtMs)}. Do not issue a second voucher.`);
+    showBanner('dup', `⚠ DUPLICATE — ${combineNames(chineseName, englishName)} already checked in at ${fmtTime(existing.checkInAtMs)}. Do not issue a second voucher.`);
     playErrorTone();
     return;
   }
   allEntries.push({
-    id: eventId + '__' + norm, name, company, eventId,
+    id: generateLocalEntryId(), chineseName: chineseName || '', englishName: englishName || '', company, eventId,
     checkInAtMs: nowMs, checkOutAtMs: null,
     checkInSignature: signature, checkOutSignature: null,
     mobile: mobile || '',
@@ -1382,8 +1687,8 @@ function checkInLocallyWithFallback(name, company, mobile, signature, registrati
     pendingSync: !!pendingSync
   });
   const label = pendingSync
-    ? `✓ ${name} checked in at ${fmtTime(nowMs)} — saved on this device (no network right now), will sync automatically once back online. Voucher can be issued.`
-    : `✓ ${name} checked in at ${fmtTime(nowMs)}. Voucher can be issued.`;
+    ? `✓ ${combineNames(chineseName, englishName)} checked in at ${fmtTime(nowMs)} — saved on this device (no network right now), will sync automatically once back online. Voucher can be issued.`
+    : `✓ ${combineNames(chineseName, englishName)} checked in at ${fmtTime(nowMs)}. Voucher can be issued.`;
   showBanner('ok', label);
   playSuccessTone();
   saveEntries();
@@ -1392,9 +1697,10 @@ function checkInLocallyWithFallback(name, company, mobile, signature, registrati
 }
 
 $('checkoutActionBtn').addEventListener('click', async () => {
-  const name = $('nameInput').value.trim();
-  if(!name){
-    alert('Please enter a name before checking out.');
+  const chineseName = $('chineseNameInput').value.trim();
+  const englishName = $('englishNameInput').value.trim();
+  if(!chineseName && !englishName){
+    alert('Please enter at least one of Chinese Name / English Name before checking out.');
     return;
   }
   const signature = getSignatureDataUrl();
@@ -1413,22 +1719,22 @@ $('checkoutActionBtn').addEventListener('click', async () => {
     if(db){
       btn.textContent = 'Checking…';
       try{
-        const result = await checkOutWithFirebase(name, signature);
+        const result = await checkOutWithFirebase(chineseName, englishName, signature);
         if(result.error){
           showBanner('dup', '⚠ ' + result.error);
           playErrorTone();
         } else {
-          showBanner('ok', `✓ ${result.name} checked out at ${fmtTime(result.checkOutAtMs)}.`);
+          showBanner('ok', `✓ ${combineNames(result.chineseName, result.englishName)} checked out at ${fmtTime(result.checkOutAtMs)}.`);
           playSuccessTone();
         }
       }catch(networkErr){
         // Could not reach Firebase — fall back to this device's own record
         // of today's check-ins so check-out still works, and mark it to
         // sync automatically once connectivity is back.
-        checkOutLocallyWithFallback(name, signature, true);
+        checkOutLocallyWithFallback(chineseName, englishName, signature, true);
       }
     } else {
-      checkOutLocallyWithFallback(name, signature, false);
+      checkOutLocallyWithFallback(chineseName, englishName, signature, false);
     }
   }catch(err){
     showBanner('warn', `⚠ Could not check out: ${err.message}`);
@@ -1444,29 +1750,32 @@ $('checkoutActionBtn').addEventListener('click', async () => {
 // (which — thanks to the Firestore listener merging pending records back in
 // — includes anything already synced from other devices too, as long as
 // this device was online at some point after that sync happened).
-function checkOutLocallyWithFallback(name, signature, pendingSync){
-  const norm = normalize(name);
+function checkOutLocallyWithFallback(chineseName, englishName, signature, pendingSync){
   // The object returned here is the same reference held inside allEntries
   // (Array.find doesn't clone), so mutating it below updates the real
   // source-of-truth list, not just a filtered copy.
-  const existing = todayEntries().find(e => normalize(e.name) === norm);
+  const existing = findExistingEntry(chineseName, englishName);
   const nowMs = Date.now();
   if(!existing){
-    showBanner('dup', `⚠ No check-in record found for "${name}" — check in first.`);
+    showBanner('dup', `⚠ No check-in record found for "${combineNames(chineseName, englishName)}" — check in first.`);
     playErrorTone();
     return;
   }
   if(existing.checkOutAtMs){
-    showBanner('dup', `⚠ ${existing.name} was already checked out at ${fmtTime(existing.checkOutAtMs)}.`);
+    showBanner('dup', `⚠ ${displayName(existing)} was already checked out at ${fmtTime(existing.checkOutAtMs)}.`);
     playErrorTone();
     return;
   }
   existing.checkOutAtMs = nowMs;
   existing.checkOutSignature = signature;
+  // Backfill whichever name field this checkout scan captured that the
+  // original check-in didn't — same reasoning as the Firebase alias-key path.
+  if(chineseName && !existing.chineseName) existing.chineseName = chineseName;
+  if(englishName && !existing.englishName) existing.englishName = englishName;
   if(pendingSync) existing.pendingSync = true;
   const label = pendingSync
-    ? `✓ ${existing.name} checked out at ${fmtTime(nowMs)} — saved on this device (no network right now), will sync automatically once back online.`
-    : `✓ ${existing.name} checked out at ${fmtTime(nowMs)}.`;
+    ? `✓ ${displayName(existing)} checked out at ${fmtTime(nowMs)} — saved on this device (no network right now), will sync automatically once back online.`
+    : `✓ ${displayName(existing)} checked out at ${fmtTime(nowMs)}.`;
   showBanner('ok', label);
   playSuccessTone();
   saveEntries();
@@ -1491,11 +1800,11 @@ $('exportBtn').addEventListener('click', async () => {
   try{
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Check-Ins');
-    const headers = ['Name','Company','Mobile No.','Email','Physician Reg. No.','Registration Match','Check-In Time','Check-Out Time','Status','Check-In Signature','Check-Out Signature'];
+    const headers = ['Chinese Name','English Name','Company','Mobile No.','Email','Physician Reg. No.','Registration Match','Check-In Time','Check-Out Time','Status','Check-In Signature','Check-Out Signature'];
     sheet.addRow(headers);
     sheet.getRow(1).font = { bold: true };
     sheet.columns = [
-      { width: 20 }, { width: 20 }, { width: 16 },
+      { width: 18 }, { width: 20 }, { width: 20 }, { width: 16 },
       { width: 22 }, { width: 18 }, { width: 22 }, { width: 20 }, { width: 20 },
       { width: 14 }, { width: 20 }, { width: 20 }
     ];
@@ -1507,7 +1816,8 @@ $('exportBtn').addEventListener('click', async () => {
       if(e.pendingSync) statusText += ' (offline — syncing)';
       if(e.syncConflict) statusText += ' (⚠ sync conflict — verify)';
       sheet.addRow([
-        e.name,
+        e.chineseName || '',
+        e.englishName || '',
         e.company || '',
         e.mobile || '',
         e.email || '',
@@ -1524,7 +1834,7 @@ $('exportBtn').addEventListener('click', async () => {
       // form, so the person reviewing the export knows which entries were
       // typed in manually rather than auto-filled from a registration.
       if(!matched){
-        const matchCell = sheet.getRow(rowIndex).getCell(6);
+        const matchCell = sheet.getRow(rowIndex).getCell(7);
         matchCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFCE8E6' } };
         matchCell.font = { color: { argb: 'FFC5221F' }, bold: true };
       }
@@ -1532,12 +1842,12 @@ $('exportBtn').addEventListener('click', async () => {
       const sigIn = dataUrlToBase64AndExt(e.checkInSignature);
       if(sigIn){
         const imgId = workbook.addImage({ base64: sigIn.base64, extension: sigIn.extension });
-        sheet.addImage(imgId, { tl: { col: 9.05, row: rowIndex - 1 + 0.05 }, ext: { width: 140, height: 45 } });
+        sheet.addImage(imgId, { tl: { col: 10.05, row: rowIndex - 1 + 0.05 }, ext: { width: 140, height: 45 } });
       }
       const sigOut = dataUrlToBase64AndExt(e.checkOutSignature);
       if(sigOut){
         const imgId = workbook.addImage({ base64: sigOut.base64, extension: sigOut.extension });
-        sheet.addImage(imgId, { tl: { col: 10.05, row: rowIndex - 1 + 0.05 }, ext: { width: 140, height: 45 } });
+        sheet.addImage(imgId, { tl: { col: 11.05, row: rowIndex - 1 + 0.05 }, ext: { width: 140, height: 45 } });
       }
     });
 
