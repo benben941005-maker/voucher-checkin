@@ -141,12 +141,6 @@
     </details>
   </div>
 
-  <div class="card" id="pendingScansCard">
-    <h2>Or Pick from Computer Scan Station <span class="count-pill" id="pendingScansCountPill">0</span></h2>
-    <div id="pendingScansStatus" style="font-size:12px;color:var(--muted);margin-bottom:8px;"></div>
-    <div id="pendingScansList"><div class="empty">No pending scans from the computer station yet.</div></div>
-  </div>
-
   <div class="card" id="confirmCard" style="display:none;">
     <h2>2. Confirm Details</h2>
     <div class="field">
@@ -446,7 +440,6 @@ function initFirebase(){
     db = firebase.firestore();
     listenForUpdates();
     listenForRegistrations();
-    listenForPendingScans();
   }catch(err){
     db = null;
     const msg = '🔴 Firebase did NOT connect (' + err.message + '). Duplicate checks are local-only on this device right now.';
@@ -622,104 +615,6 @@ function listenForRegistrations(){
     // Not fatal — registration auto-fill is a convenience, not required for check-in.
     console.warn('Could not load registrations for auto-fill:', err.message);
   });
-}
-
-// --- Pending scans: name cards scanned at a separate computer scan station
-// (scan_station.html, sharing this same Firebase project), written here as
-// "pre-scanned, not yet checked in". Staff at this check-in counter pick one
-// from the list below instead of re-scanning, confirm/edit the details, get
-// the guest to sign, and complete Check-In as normal — which then marks the
-// pending scan as consumed so it drops off everyone's list. Purely a
-// convenience: scanning or typing a name directly here still works exactly
-// as before, with or without the station.
-const PENDING_SCANS_COLLECTION = 'pendingScans';
-let pendingScans = [];
-let unsubscribePendingScans = null;
-// Which pending-scan doc (if any) is currently loaded into the confirm form —
-// cleared on every fresh scan/manual pick, and marked consumed once Check-In
-// actually completes (see consumeActivePendingScanIfAny).
-let activePendingScanId = null;
-
-function listenForPendingScans(){
-  if(!db) return;
-  if(unsubscribePendingScans) unsubscribePendingScans();
-  unsubscribePendingScans = db.collection(PENDING_SCANS_COLLECTION)
-    .where('consumed', '==', false)
-    .onSnapshot(snap => {
-      const list = [];
-      snap.forEach(doc => list.push(Object.assign({ id: doc.id }, doc.data())));
-      list.sort((a,b) => (b.scannedAtMs||0) - (a.scannedAtMs||0));
-      pendingScans = list;
-      $('pendingScansStatus').textContent = '';
-      renderPendingScans();
-    }, err => {
-      $('pendingScansStatus').innerHTML = '<span style="color:var(--red);">Could not load computer-station scans: ' + escapeHtml(err.message) + '</span>';
-    });
-}
-
-function renderPendingScans(){
-  $('pendingScansCountPill').textContent = pendingScans.length;
-  const wrap = $('pendingScansList');
-  if(!pendingScans.length){
-    wrap.innerHTML = '<div class="empty">No pending scans from the computer station yet.</div>';
-    return;
-  }
-  wrap.innerHTML = pendingScans.map(p => `
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);">
-      <div style="min-width:0;">
-        <div style="font-weight:600;">${escapeHtml(p.name || '(no name)')}</div>
-        <div style="font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml([p.company, p.mobile].filter(Boolean).join(' · ') || 'No company/mobile captured')}</div>
-      </div>
-      <button class="btn-secondary btn-small use-pending-scan-btn" data-id="${escapeHtml(p.id)}" style="flex-shrink:0;">Use This ▸</button>
-    </div>
-  `).join('');
-}
-
-$('pendingScansList').addEventListener('click', e => {
-  const btn = e.target.closest('.use-pending-scan-btn');
-  if(!btn) return;
-  usePendingScan(btn.dataset.id);
-});
-
-function usePendingScan(id){
-  const scan = pendingScans.find(p => p.id === id);
-  if(!scan) return;
-  clearBanner();
-  activePendingScanId = id;
-  $('preview').style.display = 'none';
-  $('rawTextWrap').style.display = 'none';
-  $('ocrStatus').textContent = '📋 Loaded from computer scan station — please confirm the details below.';
-  // scan_station.html only captures a single best-guess "name" field (it
-  // doesn't separate Chinese/English) — bucket it into whichever of the two
-  // fields it looks like it belongs in, same heuristic as guessNames() below.
-  const guess = classifyScannedName(scan.name || '');
-  $('chineseNameInput').value = guess.chineseName;
-  $('englishNameInput').value = guess.englishName;
-  $('companyInput').value = scan.company || '';
-  $('mobileInput').value = scan.mobile || '';
-  $('confirmCard').style.display = 'block';
-  $('confirmCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
-  checkSimilar(guess.chineseName, guess.englishName);
-  autoFillFromNames(guess.chineseName, guess.englishName);
-}
-
-// Marks the pending scan this check-in was loaded from as done, so it drops
-// off the shared list once the guest has actually been checked in — never
-// blocks or fails the check-in itself if this update doesn't go through.
-async function consumeActivePendingScanIfAny(){
-  if(!activePendingScanId) return;
-  const id = activePendingScanId;
-  activePendingScanId = null;
-  if(db){
-    try{
-      await db.collection(PENDING_SCANS_COLLECTION).doc(id).update({ consumed: true, consumedAtMs: Date.now() });
-    }catch(err){
-      console.warn('Could not mark pending scan as consumed (it may linger in the list):', err.message);
-    }
-  } else {
-    pendingScans = pendingScans.filter(p => p.id !== id);
-    renderPendingScans();
-  }
 }
 
 function findRegistrationMatch(chineseName, englishName){
@@ -1175,7 +1070,6 @@ function handleUploadedFile(file){
 // occasionally drop or misread rare/complex Chinese characters — if that
 // happens often, re-type the name manually when confirming.
 async function runOcr(dataUrl){
-  activePendingScanId = null;
   $('ocrStatus').textContent = 'Reading name card…';
 
   let rawText = null;
@@ -1482,7 +1376,6 @@ function resetCaptureUi(){
   $('fileInput').value = '';
   resetSignaturePad();
   applyRegistrationMatch(null);
-  activePendingScanId = null;
 }
 
 // Duplicate prevention now has to work even when the SAME person is scanned
@@ -1619,11 +1512,6 @@ $('checkinActionBtn').addEventListener('click', async () => {
   // to the tap — before any "await" below. iOS Safari only allows audio to start
   // as a direct result of a user gesture.
   getAudioCtx();
-
-  // If this check-in was loaded from the computer scan station's pending
-  // list, this guest is now being dealt with one way or another (checked in
-  // fresh, or found to already be checked in) — so it's done with either way.
-  await consumeActivePendingScanIfAny();
 
   try{
     if(db){
