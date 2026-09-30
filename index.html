@@ -1239,10 +1239,34 @@ function guessNames(rawText){
   }
   // A short line made up purely of Chinese characters (2-4 is typical for a
   // Chinese personal name) is the strongest signal for the Chinese field.
-  const chineseName = candidates.find(l => /^[一-鿿·]{2,4}$/.test(l)) || '';
+  let chineseName = candidates.find(l => /^[一-鿿·]{2,4}$/.test(l)) || '';
   // A short line of letters shaped like a Western personal name (1-4 words,
   // letters/punctuation only) for the English field.
-  const englishName = candidates.find(l => /^[A-Za-z][A-Za-z.\-' ]{1,40}$/.test(l) && l.split(/\s+/).length <= 4) || '';
+  let englishName = candidates.find(l => /^[A-Za-z][A-Za-z.\-' ]{1,40}$/.test(l) && l.split(/\s+/).length <= 4) || '';
+
+  // The two strict whole-line checks above only match when a name has its
+  // OWN clean line. Some cards print both names together on one line (e.g.
+  // "Zhang San 张三"), or OCR inserts a stray space in the middle of a
+  // Chinese name (e.g. "张 三") — either way that line matches NEITHER
+  // strict pattern, and previously, as soon as ONE field was found on some
+  // other line, the function returned immediately and never even tried to
+  // recover the other — so capturing the English name could silently drop
+  // the Chinese one entirely. Fix: whichever field is still missing gets an
+  // independent second look — an embedded run of that script inside any
+  // surviving line — before giving up on it.
+  if(!chineseName){
+    for(const line of candidates){
+      const m = line.replace(/\s+/g, '').match(/[一-鿿]{2,6}/);
+      if(m){ chineseName = m[0]; break; }
+    }
+  }
+  if(!englishName){
+    for(const line of candidates){
+      const m = line.match(/[A-Za-z][A-Za-z.\-']{1,30}(?:\s+[A-Za-z][A-Za-z.\-']{1,30}){0,3}/);
+      if(m){ englishName = m[0].trim(); break; }
+    }
+  }
+
   if(chineseName || englishName) return { chineseName, englishName };
   // Neither shape matched anything — last resort: the first surviving
   // candidate line, or failing that, just the very first line on the card,
