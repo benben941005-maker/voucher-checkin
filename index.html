@@ -141,6 +141,18 @@
     </details>
   </div>
 
+  <div class="card">
+    <h2>Or: Key in Registration No.</h2>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:8px;">
+      If this registrant's Firestore record has a "no" field set (maintained manually in Firebase Console), type it here to instantly fill in their details — no scanning needed.
+    </div>
+    <div class="btn-row">
+      <input type="text" id="regNoInput" inputmode="numeric" placeholder="e.g. 9" style="flex:1;">
+      <button class="btn-primary" id="regNoLookupBtn" style="width:auto;">🔍 Find</button>
+    </div>
+    <div id="regNoLookupStatus" style="font-size:12px;margin-top:8px;"></div>
+  </div>
+
   <div class="card" id="confirmCard" style="display:none;">
     <h2>2. Confirm Details</h2>
     <div class="field">
@@ -557,6 +569,8 @@ async function trySyncPendingEntries(){
           checkOutSignature: entry.checkOutSignature || null,
           mobile: entry.mobile || '', email: entry.email || '',
           physicianNo: entry.physicianNo || '',
+          paidForEvent: entry.paidForEvent || '',
+          mobileLinkedPaynow: entry.mobileLinkedPaynow || '',
           registrationMatched: !!entry.registrationMatched
         });
         if(keyZhRef) tx.set(keyZhRef, { checkinId: entry.id });
@@ -657,14 +671,27 @@ function applyRegistrationMatch(match){
   if(!companyInput.value.trim() && match.organization) companyInput.value = match.organization;
   if(!mobileInput.value.trim() && match.mobile) mobileInput.value = match.mobile;
 
+  // Each part is escaped individually as it's pushed — the Paid:No part
+  // below intentionally carries real HTML (a bold/red span), so the whole
+  // joined string can no longer be escaped in one pass the way it used to.
   const parts = [];
-  if(match.englishName) parts.push(match.englishName);
-  if(match.organization) parts.push(match.organization);
-  if(match.mobile) parts.push(match.mobile);
+  if(match.englishName) parts.push(escapeHtml(match.englishName));
+  if(match.organization) parts.push(escapeHtml(match.organization));
+  if(match.mobile) parts.push(escapeHtml(match.mobile));
+  // Paid/PayNow status comes straight from this person's own registration
+  // form answers — shown here so staff can see at a glance whether payment
+  // still needs to be collected at the door, without digging through the
+  // registration admin page. Highlighted in red when NOT paid, so it stands
+  // out inside an otherwise all-green "matched" note.
+  if(match.paidForEvent){
+    const paidYes = /^yes$/i.test(match.paidForEvent);
+    parts.push(paidYes ? 'Paid: Yes' : '<b style="color:var(--red);">Paid: No</b>');
+  }
+  if(match.mobileLinkedPaynow) parts.push('PayNow: ' + escapeHtml(match.mobileLinkedPaynow));
   note.style.display = 'block';
   note.style.color = 'var(--green)';
   note.style.background = 'var(--green-bg)';
-  note.innerHTML = '✓ Matched conference registration' + (parts.length ? ' — ' + escapeHtml(parts.join(' · ')) : '');
+  note.innerHTML = '✓ Matched conference registration' + (parts.length ? ' — ' + parts.join(' · ') : '');
 }
 
 // Finds this name's own check-in record FOR TODAY (if they've already been
@@ -704,12 +731,18 @@ function applyExistingEntry(existing){
   if(!companyInput.value.trim() && existing.company) companyInput.value = existing.company;
   if(!mobileInput.value.trim() && existing.mobile) mobileInput.value = existing.mobile;
 
+  let paidNote = '';
+  if(existing.paidForEvent){
+    const paidYes = /^yes$/i.test(existing.paidForEvent);
+    paidNote = ' ' + (paidYes ? 'Paid: Yes.' : '<b style="color:var(--red);">Paid: No.</b>');
+  }
   note.style.display = 'block';
   note.style.color = 'var(--blue)';
   note.style.background = 'var(--blue-bg)';
   note.innerHTML = '↩ Already checked in at ' + escapeHtml(fmtTime(existing.checkInAtMs)) +
     ' — Name/Organization/Mobile No. copied from that check-in record.' +
-    (existing.checkOutAtMs ? ' Already checked out at ' + escapeHtml(fmtTime(existing.checkOutAtMs)) + '.' : '');
+    (existing.checkOutAtMs ? ' Already checked out at ' + escapeHtml(fmtTime(existing.checkOutAtMs)) + '.' : '') +
+    paidNote;
 }
 
 // Single entry point used whenever either name field changes (after a scan
@@ -870,16 +903,23 @@ function renderTable(){
     const nameCell = e.chineseName && e.englishName
       ? `${escapeHtml(e.chineseName)}<br><span style="color:var(--muted);font-size:11px;">${escapeHtml(e.englishName)}</span>`
       : escapeHtml(e.chineseName || e.englishName || e.name || '');
+    let paidCell = '<span class="muted-dash">—</span>';
+    if(e.paidForEvent){
+      const paidYes = /^yes$/i.test(e.paidForEvent);
+      paidCell = paidYes ? 'Paid: Yes' : '<b style="color:var(--red);">Paid: No</b>';
+      if(e.mobileLinkedPaynow) paidCell += `<br><span style="color:var(--muted);font-size:11px;">PayNow: ${escapeHtml(e.mobileLinkedPaynow)}</span>`;
+    }
     return `<tr>
       <td>${nameCell}</td>
       <td>${escapeHtml(e.company||'')}</td>
+      <td>${paidCell}</td>
       <td>${fmtTime(e.checkInAtMs)}</td>
       <td>${fmtTime(e.checkOutAtMs)}</td>
       <td>${statusBadge}</td>
       <td>${sigIn}${sigOut}</td>
     </tr>`;
   }).join('');
-  $('tableWrap').innerHTML = `<table><thead><tr><th>Name</th><th>Company</th><th>Check-In</th><th>Check-Out</th><th>Status</th><th>Signatures</th></tr></thead><tbody>${rows}</tbody></table>`;
+  $('tableWrap').innerHTML = `<table><thead><tr><th>Name</th><th>Company</th><th>Paid / PayNow</th><th>Check-In</th><th>Check-Out</th><th>Status</th><th>Signatures</th></tr></thead><tbody>${rows}</tbody></table>`;
   $('tableWrap').querySelectorAll('.sig-thumb').forEach(img => {
     img.addEventListener('click', () => openSigView(img.src, img.getAttribute('data-sig-label')));
   });
@@ -1323,6 +1363,44 @@ function onNameFieldInput(){
 $('chineseNameInput').addEventListener('input', onNameFieldInput);
 $('englishNameInput').addEventListener('input', onNameFieldInput);
 
+// Quick lookup by a "no" field on the registration document itself — an
+// alternative to scanning a name card. `registrations` is already kept live
+// by listenForRegistrations() above (a Firestore onSnapshot listener), so
+// this works the instant that field is added/edited in Firebase Console —
+// no re-import or page reload needed. Reuses the exact same fill-in path a
+// name match takes (onNameFieldInput → autoFillFromNames →
+// applyRegistrationMatch/findExistingEntry) by just setting the name fields
+// from the matched record and firing that same handler, so "already
+// checked in today" detection, Paid/PayNow display etc. all still apply.
+function doRegNoLookup(){
+  const status = $('regNoLookupStatus');
+  const val = $('regNoInput').value.trim();
+  if(!val){ status.textContent = ''; return; }
+  if(!registrations.length){
+    status.innerHTML = '<span style="color:var(--amber);">⚠ No registrations loaded yet — check the Firebase Sync connection above.</span>';
+    return;
+  }
+  const reg = registrations.find(r => String(r.no == null ? '' : r.no).trim() === val);
+  if(!reg){
+    status.innerHTML = '<span style="color:var(--red);">✗ No registrant found with No. ' + escapeHtml(val) + ' — make sure that document has a "no" field set in Firebase Console.</span>';
+    return;
+  }
+  status.innerHTML = '<span style="color:var(--green);">✓ Found ' + escapeHtml(combineNames(reg.chineseName, reg.englishName)) + ' — details filled in below.</span>';
+  $('preview').style.display = 'none';
+  $('rawTextWrap').style.display = 'none';
+  $('ocrStatus').textContent = '';
+  $('chineseNameInput').value = reg.chineseName || '';
+  $('englishNameInput').value = reg.englishName || '';
+  $('companyInput').value = '';
+  $('mobileInput').value = '';
+  $('confirmCard').style.display = 'block';
+  onNameFieldInput();
+}
+$('regNoLookupBtn').addEventListener('click', doRegNoLookup);
+$('regNoInput').addEventListener('keydown', e => {
+  if(e.key === 'Enter'){ e.preventDefault(); doRegNoLookup(); }
+});
+
 // --- Signature pad ---
 // A plain canvas + Pointer Events (covers mouse, touch and pen with one code
 // path). touch-action:none on the canvas (see CSS) stops the page from
@@ -1456,6 +1534,11 @@ async function checkInWithFirebase(chineseName, englishName, company, mobile, si
       // (no manual field for these on this form) — otherwise left blank.
       email: (registrationInfo && registrationInfo.email) || '',
       physicianNo: (registrationInfo && registrationInfo.physicianNo) || '',
+      // Paid/PayNow are the guest's own answers from the registration form —
+      // carried onto the check-in record (not just shown transiently in the
+      // note above) so they're visible later in the table and Excel export.
+      paidForEvent: (registrationInfo && registrationInfo.paidForEvent) || '',
+      mobileLinkedPaynow: (registrationInfo && registrationInfo.mobileLinkedPaynow) || '',
       // True only when the scanned/typed name matched an entry in the
       // separate conference registration form. Used to flag "verify manually"
       // rows in the Excel export.
@@ -1595,6 +1678,8 @@ function checkInLocallyWithFallback(chineseName, englishName, company, mobile, s
     mobile: mobile || '',
     email: (registrationMatch && registrationMatch.email) || '',
     physicianNo: (registrationMatch && registrationMatch.physicianNo) || '',
+    paidForEvent: (registrationMatch && registrationMatch.paidForEvent) || '',
+    mobileLinkedPaynow: (registrationMatch && registrationMatch.mobileLinkedPaynow) || '',
     registrationMatched: !!registrationMatch,
     pendingSync: !!pendingSync
   });
@@ -1712,12 +1797,12 @@ $('exportBtn').addEventListener('click', async () => {
   try{
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Check-Ins');
-    const headers = ['Chinese Name','English Name','Company','Mobile No.','Email','Physician Reg. No.','Registration Match','Check-In Time','Check-Out Time','Status','Check-In Signature','Check-Out Signature'];
+    const headers = ['Chinese Name','English Name','Company','Mobile No.','Email','Physician Reg. No.','Registration Match','Paid for Event','Mobile linked to PayNow','Check-In Time','Check-Out Time','Status','Check-In Signature','Check-Out Signature'];
     sheet.addRow(headers);
     sheet.getRow(1).font = { bold: true };
     sheet.columns = [
       { width: 18 }, { width: 20 }, { width: 20 }, { width: 16 },
-      { width: 22 }, { width: 18 }, { width: 22 }, { width: 20 }, { width: 20 },
+      { width: 22 }, { width: 18 }, { width: 22 }, { width: 16 }, { width: 18 }, { width: 20 }, { width: 20 },
       { width: 14 }, { width: 20 }, { width: 20 }
     ];
 
@@ -1735,6 +1820,8 @@ $('exportBtn').addEventListener('click', async () => {
         e.email || '',
         e.physicianNo || '',
         matched ? 'Matched' : 'No Match — Verify',
+        e.paidForEvent || '',
+        e.mobileLinkedPaynow || '',
         e.checkInAtMs ? new Date(e.checkInAtMs).toLocaleString() : '',
         e.checkOutAtMs ? new Date(e.checkOutAtMs).toLocaleString() : '',
         statusText,
@@ -1750,16 +1837,23 @@ $('exportBtn').addEventListener('click', async () => {
         matchCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFCE8E6' } };
         matchCell.font = { color: { argb: 'FFC5221F' }, bold: true };
       }
+      // Flag "Paid for Event" = No the same way, so unpaid guests stand out
+      // just as clearly as unmatched ones.
+      if(e.paidForEvent && /^no$/i.test(e.paidForEvent)){
+        const paidCell = sheet.getRow(rowIndex).getCell(8);
+        paidCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFCE8E6' } };
+        paidCell.font = { color: { argb: 'FFC5221F' }, bold: true };
+      }
 
       const sigIn = dataUrlToBase64AndExt(e.checkInSignature);
       if(sigIn){
         const imgId = workbook.addImage({ base64: sigIn.base64, extension: sigIn.extension });
-        sheet.addImage(imgId, { tl: { col: 10.05, row: rowIndex - 1 + 0.05 }, ext: { width: 140, height: 45 } });
+        sheet.addImage(imgId, { tl: { col: 12.05, row: rowIndex - 1 + 0.05 }, ext: { width: 140, height: 45 } });
       }
       const sigOut = dataUrlToBase64AndExt(e.checkOutSignature);
       if(sigOut){
         const imgId = workbook.addImage({ base64: sigOut.base64, extension: sigOut.extension });
-        sheet.addImage(imgId, { tl: { col: 11.05, row: rowIndex - 1 + 0.05 }, ext: { width: 140, height: 45 } });
+        sheet.addImage(imgId, { tl: { col: 13.05, row: rowIndex - 1 + 0.05 }, ext: { width: 140, height: 45 } });
       }
     });
 
