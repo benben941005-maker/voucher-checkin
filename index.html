@@ -44,8 +44,8 @@
   .btn-small{padding:6px 10px;font-size:12px;width:auto;}
   .btn-row{display:flex;gap:10px;}
   .btn-row button{flex:1;}
-  input[type=text],input[type=datetime-local]{width:100%;font-size:15px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin-top:4px;}
-  input[type=text].no-match{border-color:var(--red);background:var(--red-bg);color:var(--red);}
+  input[type=text],input[type=datetime-local],select{width:100%;font-size:15px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin-top:4px;background:#fff;color:var(--text);}
+  input[type=text].no-match, select.no-match{border-color:var(--red);background:var(--red-bg);color:var(--red);}
   textarea{width:100%;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:8px 10px;border:1px solid var(--border);border-radius:8px;margin-top:4px;resize:vertical;}
   label{font-size:13px;color:var(--muted);font-weight:600;}
   .field{margin-bottom:12px;}
@@ -170,6 +170,22 @@
     <div class="field">
       <label for="mobileInput">Mobile No. (auto-filled if matched with registration, check-in only)</label>
       <input type="text" id="mobileInput" placeholder="Mobile number">
+    </div>
+    <div class="field">
+      <label for="paidForEventInput">Paid for Event 已付款 (auto-filled if matched — turns red if not, please ask &amp; select)</label>
+      <select id="paidForEventInput">
+        <option value="">— Select —</option>
+        <option value="Yes">Yes 是</option>
+        <option value="No">No 否</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="paynowInput">Mobile linked to PayNow (auto-filled if matched — turns red if not, please ask &amp; select)</label>
+      <select id="paynowInput">
+        <option value="">— Select —</option>
+        <option value="Yes">Yes 是</option>
+        <option value="No">No 否</option>
+      </select>
     </div>
     <div id="registrationMatchNote" style="display:none;font-size:12px;color:var(--green);background:var(--green-bg);padding:8px 10px;border-radius:8px;margin-bottom:12px;"></div>
     <div id="similarWarning"></div>
@@ -647,6 +663,8 @@ function applyRegistrationMatch(match){
   const mobileInput = $('mobileInput');
   const chineseNameInput = $('chineseNameInput');
   const englishNameInput = $('englishNameInput');
+  const paidForEventInput = $('paidForEventInput');
+  const paynowInput = $('paynowInput');
   if(!match){
     note.className = '';
     note.style.display = 'block';
@@ -655,10 +673,18 @@ function applyRegistrationMatch(match){
     note.innerHTML = '✗ No matching conference registration found — please check/type Organization and Mobile No. manually.';
     companyInput.classList.add('no-match');
     mobileInput.classList.add('no-match');
+    // No registration record means there's no Paid/PayNow answer to pull in
+    // either — turn these red too, the same cue as Organization/Mobile
+    // above, so staff know to ask the guest directly and select manually
+    // rather than assume anything.
+    paidForEventInput.classList.add('no-match');
+    paynowInput.classList.add('no-match');
     return;
   }
   companyInput.classList.remove('no-match');
   mobileInput.classList.remove('no-match');
+  paidForEventInput.classList.remove('no-match');
+  paynowInput.classList.remove('no-match');
   // Only fill in a field if the user hasn't already typed something into it —
   // never silently overwrite a manual correction. This also bridges a card
   // scan that only picked up ONE of the two printed names: once matched to a
@@ -670,6 +696,8 @@ function applyRegistrationMatch(match){
   if(!englishNameInput.value.trim() && match.englishName) englishNameInput.value = match.englishName;
   if(!companyInput.value.trim() && match.organization) companyInput.value = match.organization;
   if(!mobileInput.value.trim() && match.mobile) mobileInput.value = match.mobile;
+  if(!paidForEventInput.value && match.paidForEvent) paidForEventInput.value = /^yes$/i.test(match.paidForEvent) ? 'Yes' : 'No';
+  if(!paynowInput.value && match.mobileLinkedPaynow) paynowInput.value = /^yes$/i.test(match.mobileLinkedPaynow) ? 'Yes' : 'No';
 
   // Each part is escaped individually as it's pushed — the Paid:No part
   // below intentionally carries real HTML (a bold/red span), so the whole
@@ -724,12 +752,18 @@ function applyExistingEntry(existing){
   const mobileInput = $('mobileInput');
   const chineseNameInput = $('chineseNameInput');
   const englishNameInput = $('englishNameInput');
+  const paidForEventInput = $('paidForEventInput');
+  const paynowInput = $('paynowInput');
   companyInput.classList.remove('no-match');
   mobileInput.classList.remove('no-match');
+  paidForEventInput.classList.remove('no-match');
+  paynowInput.classList.remove('no-match');
   if(!chineseNameInput.value.trim() && existing.chineseName) chineseNameInput.value = existing.chineseName;
   if(!englishNameInput.value.trim() && existing.englishName) englishNameInput.value = existing.englishName;
   if(!companyInput.value.trim() && existing.company) companyInput.value = existing.company;
   if(!mobileInput.value.trim() && existing.mobile) mobileInput.value = existing.mobile;
+  if(!paidForEventInput.value && existing.paidForEvent) paidForEventInput.value = /^yes$/i.test(existing.paidForEvent) ? 'Yes' : 'No';
+  if(!paynowInput.value && existing.mobileLinkedPaynow) paynowInput.value = /^yes$/i.test(existing.mobileLinkedPaynow) ? 'Yes' : 'No';
 
   let paidNote = '';
   if(existing.paidForEvent){
@@ -1152,6 +1186,8 @@ async function runOcr(dataUrl){
     $('englishNameInput').value = names.englishName;
     $('companyInput').value = '';
     $('mobileInput').value = '';
+    $('paidForEventInput').value = '';
+    $('paynowInput').value = '';
     $('confirmCard').style.display = 'block';
     checkSimilar(names.chineseName, names.englishName);
     autoFillFromNames(names.chineseName, names.englishName);
@@ -1174,6 +1210,8 @@ async function runOcr(dataUrl){
     $('englishNameInput').value = names.englishName;
     $('companyInput').value = '';
     $('mobileInput').value = '';
+    $('paidForEventInput').value = '';
+    $('paynowInput').value = '';
     $('confirmCard').style.display = 'block';
     checkSimilar(names.chineseName, names.englishName);
     autoFillFromNames(names.chineseName, names.englishName);
@@ -1183,6 +1221,8 @@ async function runOcr(dataUrl){
     $('englishNameInput').value = '';
     $('companyInput').value = '';
     $('mobileInput').value = '';
+    $('paidForEventInput').value = '';
+    $('paynowInput').value = '';
     $('confirmCard').style.display = 'block';
     applyRegistrationMatch(null);
   }
@@ -1393,6 +1433,8 @@ function doRegNoLookup(){
   $('englishNameInput').value = reg.englishName || '';
   $('companyInput').value = '';
   $('mobileInput').value = '';
+  $('paidForEventInput').value = '';
+  $('paynowInput').value = '';
   $('confirmCard').style.display = 'block';
   onNameFieldInput();
 }
@@ -1499,7 +1541,7 @@ function checkinKeyRef(kind, norm){
   return norm ? db.collection('checkinKeys').doc(eventId + '__' + kind + '__' + norm) : null;
 }
 
-async function checkInWithFirebase(chineseName, englishName, company, mobile, signature, registrationInfo){
+async function checkInWithFirebase(chineseName, englishName, company, mobile, signature, registrationInfo, paidForEvent, mobileLinkedPaynow){
   const normZh = normalize(chineseName || '');
   const normEn = normalize(englishName || '');
   const keyZhRef = checkinKeyRef('zh', normZh);
@@ -1534,11 +1576,15 @@ async function checkInWithFirebase(chineseName, englishName, company, mobile, si
       // (no manual field for these on this form) — otherwise left blank.
       email: (registrationInfo && registrationInfo.email) || '',
       physicianNo: (registrationInfo && registrationInfo.physicianNo) || '',
-      // Paid/PayNow are the guest's own answers from the registration form —
-      // carried onto the check-in record (not just shown transiently in the
-      // note above) so they're visible later in the table and Excel export.
-      paidForEvent: (registrationInfo && registrationInfo.paidForEvent) || '',
-      mobileLinkedPaynow: (registrationInfo && registrationInfo.mobileLinkedPaynow) || '',
+      // Paid/PayNow: whatever is in the two Yes/No selects on the confirm
+      // card at the moment of check-in — auto-filled from a registration
+      // match when there was one, or picked by hand (the fields show red
+      // until staff does) when there wasn't. Required before check-in is
+      // allowed (see the checkinActionBtn handler), so these are never
+      // blank here, unlike email/physicianNo above which have no manual
+      // fallback at all.
+      paidForEvent: paidForEvent || '',
+      mobileLinkedPaynow: mobileLinkedPaynow || '',
       // True only when the scanned/typed name matched an entry in the
       // separate conference registration form. Used to flag "verify manually"
       // rows in the Excel export.
@@ -1594,6 +1640,8 @@ $('checkinActionBtn').addEventListener('click', async () => {
   const englishName = $('englishNameInput').value.trim();
   const company = $('companyInput').value.trim();
   const mobile = $('mobileInput').value.trim();
+  const paidForEvent = $('paidForEventInput').value;
+  const mobileLinkedPaynow = $('paynowInput').value;
   if(!chineseName && !englishName){
     alert('Please enter at least one of Chinese Name / English Name before checking in.');
     return;
@@ -1603,6 +1651,19 @@ $('checkinActionBtn').addEventListener('click', async () => {
   if(!registrationMatch && !mobile){
     alert('No matching conference registration found for this name. Please type in the Mobile No. manually before checking in.');
     $('mobileInput').focus();
+    return;
+  }
+  // Paid/PayNow must always be an explicit Yes/No before check-in — whether
+  // it was auto-filled from a registration match or (for an unmatched
+  // walk-in, shown red) typed in by hand — never saved blank.
+  if(!paidForEvent){
+    alert('Please select Paid for Event (Yes/No) before checking in.');
+    $('paidForEventInput').focus();
+    return;
+  }
+  if(!mobileLinkedPaynow){
+    alert('Please select Mobile linked to PayNow (Yes/No) before checking in.');
+    $('paynowInput').focus();
     return;
   }
 
@@ -1624,7 +1685,7 @@ $('checkinActionBtn').addEventListener('click', async () => {
     if(db){
       btn.textContent = 'Checking…';
       try{
-        const result = await checkInWithFirebase(chineseName, englishName, company, mobile, signature, registrationMatch);
+        const result = await checkInWithFirebase(chineseName, englishName, company, mobile, signature, registrationMatch, paidForEvent, mobileLinkedPaynow);
         if(result.duplicate){
           showBanner('dup', `⚠ DUPLICATE — ${combineNames(chineseName, englishName)} already checked in at ${fmtTime(result.existingCheckInAtMs)}. Do not issue a second voucher.`);
           playErrorTone();
@@ -1638,11 +1699,11 @@ $('checkinActionBtn').addEventListener('click', async () => {
         // lose the check-in: save it on THIS device instead (checked for
         // duplicates against today's records already synced here), and it
         // will sync to Firebase automatically once connectivity returns.
-        checkInLocallyWithFallback(chineseName, englishName, company, mobile, signature, registrationMatch, true);
+        checkInLocallyWithFallback(chineseName, englishName, company, mobile, signature, registrationMatch, true, paidForEvent, mobileLinkedPaynow);
       }
     } else {
       // No sync configured at all on this device — single-device local-only check.
-      checkInLocallyWithFallback(chineseName, englishName, company, mobile, signature, registrationMatch, false);
+      checkInLocallyWithFallback(chineseName, englishName, company, mobile, signature, registrationMatch, false, paidForEvent, mobileLinkedPaynow);
     }
   }catch(err){
     showBanner('warn', `⚠ Could not check in: ${err.message}`);
@@ -1663,7 +1724,7 @@ function generateLocalEntryId(){
   return eventId + '__local__' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
-function checkInLocallyWithFallback(chineseName, englishName, company, mobile, signature, registrationMatch, pendingSync){
+function checkInLocallyWithFallback(chineseName, englishName, company, mobile, signature, registrationMatch, pendingSync, paidForEvent, mobileLinkedPaynow){
   const existing = findExistingEntry(chineseName, englishName);
   const nowMs = Date.now();
   if(existing){
@@ -1678,8 +1739,11 @@ function checkInLocallyWithFallback(chineseName, englishName, company, mobile, s
     mobile: mobile || '',
     email: (registrationMatch && registrationMatch.email) || '',
     physicianNo: (registrationMatch && registrationMatch.physicianNo) || '',
-    paidForEvent: (registrationMatch && registrationMatch.paidForEvent) || '',
-    mobileLinkedPaynow: (registrationMatch && registrationMatch.mobileLinkedPaynow) || '',
+    // Same as checkInWithFirebase above: the two Yes/No selects on the
+    // confirm card at the moment of check-in, not derived from the
+    // registration match alone — covers the unmatched walk-in case too.
+    paidForEvent: paidForEvent || '',
+    mobileLinkedPaynow: mobileLinkedPaynow || '',
     registrationMatched: !!registrationMatch,
     pendingSync: !!pendingSync
   });
